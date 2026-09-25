@@ -7,7 +7,7 @@
 namespace Mp
 {
     // Checked on the first byte of everything that arrives. Bumped when any packet changes meaning.
-    const uint8_t                                                   PROTOCOL_VERSION = 1;
+    const uint8_t                                                   PROTOCOL_VERSION = 2;
 
     enum PacketType : uint8_t
     {
@@ -18,7 +18,26 @@ namespace Mp
         PACKET_STATE = 4,       // host -> clients, 20-30 Hz
         PACKET_EVENT = 5,       // host -> clients, reliable
         PACKET_BYE = 6,         // either way, once
+        PACKET_MOVE = 7,        // client -> host, where he is. Gives way to INPUT at stage 2.
     };
+
+    // A dead body is still drawn; the game plays its death out.
+    const uint8_t                                                   BODY_DEAD = 0x01;
+
+    // One player as the wire carries him. 26 bytes.
+    struct                                                          Body
+    {
+        uint8_t                                                     id;
+        uint16_t                                                    room;
+        float                                                       position[3];
+        float                                                       facing;
+        float                                                       frame;      // animation position
+        uint8_t                                                     state;
+        uint8_t                                                     subState;
+        uint8_t                                                     flags;
+    };
+
+    const int                                                       BODY_SIZE = 26;
 
     // version, type, sequence
     const int                                                       HEADER_SIZE = 4;
@@ -266,6 +285,34 @@ namespace Mp
         int                                                         m_at;
         bool                                                        m_bad;
     };
+
+    inline void                                                     WriteBody(Writer& writer, const Body& body)
+    {
+        writer.U8(body.id);
+        writer.U16(body.room);
+        writer.Float(body.position[0]);
+        writer.Float(body.position[1]);
+        writer.Float(body.position[2]);
+        writer.Float(body.facing);
+        writer.Float(body.frame);
+        writer.U8(body.state);
+        writer.U8(body.subState);
+        writer.U8(body.flags);
+    }
+
+    inline void                                                     ReadBody(Reader& reader, Body& body)
+    {
+        body.id = reader.U8();
+        body.room = reader.U16();
+        body.position[0] = reader.Float();
+        body.position[1] = reader.Float();
+        body.position[2] = reader.Float();
+        body.facing = reader.Float();
+        body.frame = reader.Float();
+        body.state = reader.U8();
+        body.subState = reader.U8();
+        body.flags = reader.U8();
+    }
 }
 
 #endif

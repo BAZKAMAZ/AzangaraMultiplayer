@@ -11,14 +11,12 @@
       <Platform>Win32</Platform>
     </ProjectConfiguration>
   </ItemGroup>
-
   <PropertyGroup Label="Globals">
     <VCProjectVersion>18.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{7A3B4EE4-B453-4A18-B6E3-C3D3E268D8ED}</ProjectGuid>
     <RootNamespace>AzangaraMultiplayer</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
-
     <!-- mod.json is written from these at every build. They are Project Properties -> Mod Settings
          in Visual Studio and AzForge: Mod Settings in VS Code - the same fields either way. -->
     <AzForgeModId>azforge.multiplayer</AzForgeModId>
@@ -28,14 +26,16 @@
     <AzForgeModDescription>Multiplayer over UDP: host authority, input from the clients, state from the host</AzForgeModDescription>
     <!-- Left empty on purpose: the build works the list out from what the sources actually use,
          and keeps working it out as the stages add subsystems. -->
-    <AzForgeModRequires></AzForgeModRequires>
+    <AzForgeModRequires>
+    </AzForgeModRequires>
+    <!-- Not derived, ever: the loader withholds the memory and patching table until a mod says the
+         word. It is used to keep the game running when its window is not the one in front. -->
+    <AzForgeModCapabilities>interop</AzForgeModCapabilities>
     <AzForgeGameDir>C:\Games\az_orginal</AzForgeGameDir>
     <AzForgeSdkDir>C:\Users\gdnew\OneDrive\Documents\Visual Studio 2022\Projects\AzForge\sdk\</AzForgeSdkDir>
     <AmodPackPath>C:\Users\gdnew\OneDrive\Documents\Visual Studio 2022\Projects\AzForge\Release\AmodPack.exe</AmodPackPath>
   </PropertyGroup>
-
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
@@ -48,17 +48,13 @@
     <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
-
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
-
   <!-- The SDK on the include path, mod.json, the .amod, the install into the game, and the
        debugger pointed at game.exe -->
   <Import Project="C:\Users\gdnew\OneDrive\Documents\Visual Studio 2022\Projects\AzForge\plugins\vs2026\AzForge.Mod.props" />
-
   <ImportGroup Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
-
   <ItemDefinitionGroup>
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
@@ -76,20 +72,19 @@
       <AdditionalDependencies>ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
-
   <ItemGroup>
+    <ClCompile Include="src\Avatars.cpp" />
+    <ClCompile Include="src\Background.cpp" />
+    <ClCompile Include="src\Focus.cpp" />
     <ClCompile Include="src\Mod.cpp" />
     <ClCompile Include="src\Net.cpp" />
   </ItemGroup>
-
   <ItemGroup>
+    <ClInclude Include="src\Avatars.h" />
+    <ClInclude Include="src\Background.h" />
+    <ClInclude Include="src\Focus.h" />
     <ClInclude Include="src\Net.h" />
     <ClInclude Include="src\Protocol.h" />
   </ItemGroup>
-
-  <ItemGroup>
-    <Text Include="docs\multiplayer-plan.md" />
-  </ItemGroup>
-
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
