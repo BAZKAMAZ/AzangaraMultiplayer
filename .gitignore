@@ -1,0 +1,16 @@
+# Visual Studio
+.vs/
+*.user
+*.aps
+
+# Build output: the DLL, the staged package and the .amod
+[Dd]ebug/
+[Rr]elease/
+ipch/
+
+# Local tooling, not part of the project
+.claude/
+.mcp.json
+
+# VS 18 shortens the intermediate folder to the project name plus a hash of the GUID
+Azangara.7A3B4EE4/
