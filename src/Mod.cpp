@@ -9,6 +9,7 @@
 
 #include "Avatars.h"
 #include "Background.h"
+#include "Bodies.h"
 #include "Focus.h"
 #include "Net.h"
 #include "Protocol.h"
@@ -28,6 +29,8 @@ namespace
         int host;           // mp_host:  1 host, 0 client, -1 whoever took the first port
         float stale;        // mp_stale: seconds a body is still worth drawing
         float delay;        // mp_delay: how far behind the newest snapshot to draw
+        float anchor;       // mp_anchor: how often a client says where he really is
+        float snap;         // mp_snap: how far a body may drift before it is put right
         int background;     // mp_background: keep running when the window is not in front
         int focus;          // mp_focus: take the keyboard only while in front
         int loss;           // mp_loss:  per cent of outgoing packets thrown away on purpose
@@ -44,6 +47,8 @@ namespace
         -1,
         5.0f,
         0.10f,
+        4.0f,
+        0.35f,
         1,
         1,
         0,
@@ -86,6 +91,30 @@ namespace
 
     Mp::Body g_before[MAX_PEERS + 1] = {};
     double g_beforeAt[MAX_PEERS + 1] = {};
+
+    // Set for a body this copy worked out itself, which is every frame rather than every packet
+    bool g_ours[MAX_PEERS + 1] = {};
+
+    // The host's side of a client: a body of our own, and the last thing he said he was pressing.
+    void* g_avatar[MAX_PEERS + 1] = {};
+    Mp::Input g_pressed[MAX_PEERS + 1] = {};
+    double g_pressedAt[MAX_PEERS + 1] = {};
+    float g_avatarFacing[MAX_PEERS + 1] = {};
+
+    Mp::Body g_anchored[MAX_PEERS + 1] = {};
+    double g_anchoredAt[MAX_PEERS + 1] = {};
+
+    float g_sinceAnchor = 0.0f;
+
+    // A client that has said nothing for this long is not playing.
+    const double INPUT_FRESH = 0.5;
+
+    // What this copy is pressing, caught on its way through the player.
+    Mp::Input g_mine = {};
+    uint32_t g_myTick = 0;
+
+    int g_jumpKeys[8] = {};
+    int g_jumpKeyCount = -1;
 
     const double PEER_TIMEOUT = 5.0;
 
@@ -200,6 +229,53 @@ namespace
         return peer;
     }
 
+    void FindJumpKeys()
+    {
+        g_jumpKeyCount = 0;
+
+        const int count = Input::KeyCount();
+
+        for (int key = 0; key < count && g_jumpKeyCount < 8; ++key)
+        {
+            AmodKeyInfo info = {};
+
+            if (Input::GetKey(key, &info) && info.target != nullptr &&
+                _stricmp(info.target, "jump") == 0)
+            {
+                g_jumpKeys[g_jumpKeyCount++] = key;
+            }
+        }
+    }
+
+    bool JumpHeld()
+    {
+        if (g_jumpKeyCount < 0)
+        {
+            FindJumpKeys();
+        }
+
+        for (int at = 0; at < g_jumpKeyCount; ++at)
+        {
+            if (Input::IsDown(g_jumpKeys[at]))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    void __cdecl OnMove(AmodPlayerMove* move, void*)
+    {
+        if (move == nullptr)
+        {
+            return;
+        }
+
+        g_mine.dirX = static_cast<int8_t>(move->dirX);
+        g_mine.dirY = static_cast<int8_t>(move->dirY);
+    }
+
     // sending
 
     bool ShouldLose()
@@ -273,12 +349,14 @@ namespace
         }
     }
 
-    void RememberBody(const Mp::Body& body, uint8_t id)
+    void RememberBody(const Mp::Body& body, uint8_t id, bool ours = false)
     {
         if (id > MAX_PEERS)
         {
             return;
         }
+
+        g_ours[id] = ours;
 
         g_before[id] = g_bodies[id];
         g_beforeAt[id] = g_bodyAt[id];
@@ -295,6 +373,12 @@ namespace
 
         const double span = g_bodyAt[id] - g_beforeAt[id];
         const double when = now - g_settings.delay;
+
+        // Ours is worked out every frame, so there is nothing between snapshots to find.
+        if (g_ours[id])
+        {
+            return latest;
+        }
 
         if (g_beforeAt[id] <= 0.0 || span <= 0.0 || when >= g_bodyAt[id])
         {
@@ -339,8 +423,9 @@ namespace
         return g_bodyAt[id] > 0.0 && (now - g_bodyAt[id]) < g_settings.stale;
     }
 
-    // Client -> host: where I am.
-    void SendMove(const Mp::Body& body)
+    // Client -> host: where I really am. Rare next to the input, and only so the host can put my
+    // body down in the right place and keep it from wandering off.
+    void SendAnchor(const Mp::Body& body)
     {
         if (!g_host.IsSet())
         {
@@ -352,6 +437,26 @@ namespace
 
         writer.Header(Mp::PACKET_MOVE, g_sequence++);
         Mp::WriteBody(writer, body);
+
+        if (!writer.Overflowed())
+        {
+            SendTo(g_host, buffer, writer.Size());
+        }
+    }
+
+    // Client -> host: what I am pressing. Where I end up is the host's to work out.
+    void SendInput()
+    {
+        if (!g_host.IsSet())
+        {
+            return;
+        }
+
+        uint8_t buffer[Mp::MAX_PACKET];
+        Mp::Writer writer(buffer, sizeof(buffer));
+
+        writer.Header(Mp::PACKET_INPUT, g_sequence++);
+        Mp::WriteInput(writer, g_mine);
 
         if (!writer.Overflowed())
         {
@@ -405,6 +510,8 @@ namespace
     }
 
     // receiving
+
+    void ForgetPeer(const Mp::Address& address);
 
     void OnPacket(const Mp::Address& from, const uint8_t* data, int size)
     {
@@ -504,6 +611,33 @@ namespace
             break;
         }
 
+        case Mp::PACKET_INPUT:
+        {
+            Mp::Input input = {};
+            Mp::ReadInput(reader, input);
+
+            if (reader.Bad() || !g_isHost)
+            {
+                ++g_ignored;
+                return;
+            }
+
+            const Peer* const peer = FindPeer(from);
+            if (peer == nullptr || peer->id == 0)
+            {
+                ++g_ignored;
+                return;
+            }
+
+            // An input from before the one in hand is a packet that overtook it on the way.
+            if (g_pressed[peer->id].tick == 0 || input.tick >= g_pressed[peer->id].tick)
+            {
+                g_pressed[peer->id] = input;
+                g_pressedAt[peer->id] = Now();
+            }
+            break;
+        }
+
         case Mp::PACKET_MOVE:
         {
             Mp::Body body = {};
@@ -515,7 +649,6 @@ namespace
                 return;
             }
 
-            // The id is the host's to decide, not the sender's.
             const Peer* const peer = FindPeer(from);
             if (peer == nullptr || peer->id == 0)
             {
@@ -523,7 +656,8 @@ namespace
                 return;
             }
 
-            RememberBody(body, peer->id);
+            g_anchored[peer->id] = body;
+            g_anchoredAt[peer->id] = Now();
             break;
         }
 
@@ -564,6 +698,7 @@ namespace
         case Mp::PACKET_BYE:
         {
             Console::Printf("mp: BYE from %s\n", Mp::ToText(from));
+            ForgetPeer(from);
             break;
         }
 
@@ -572,8 +707,7 @@ namespace
             // INPUT, STATE and EVENT are stages 1 and 2. Counted, not acted on.
             if (g_settings.chatter)
             {
-                Console::Printf("mp: %s #%u from %s, %d bytes\n",
-                                Mp::PacketName(type), sequence, Mp::ToText(from), size);
+                Console::Printf("mp: %s #%u from %s, %d bytes\n", Mp::PacketName(type), sequence, Mp::ToText(from), size);
             }
             break;
         }
@@ -631,6 +765,148 @@ namespace
         }
     }
 
+    void DropAvatar(uint8_t id)
+    {
+        if (id <= MAX_PEERS && g_avatar[id] != nullptr)
+        {
+            Mp::Bodies::Destroy(g_avatar[id]);
+            g_avatar[id] = nullptr;
+        }
+    }
+
+    void DropAvatars()
+    {
+        for (int id = 0; id <= MAX_PEERS; ++id)
+        {
+            DropAvatar(static_cast<uint8_t>(id));
+        }
+    }
+
+    void StepAvatars(float seconds, const Mp::Body& mine)
+    {
+        if (!Mp::Bodies::IsOpen())
+        {
+            return;
+        }
+
+        for (int at = 0; at < g_peerCount; ++at)
+        {
+            const uint8_t id = g_peers[at].id;
+
+            if (id == 0 || id > MAX_PEERS)
+            {
+                continue;
+            }
+
+            const double now = Now();
+
+            const bool playing = (now - g_pressedAt[id]) < INPUT_FRESH && (now - g_anchoredAt[id]) < INPUT_FRESH;
+
+            // Another room is stage 5's business. Until then his body has no ground to stand on
+            // here, so it is put down rather than simulated against the wrong grid.
+            if (!playing || g_anchored[id].room != mine.room)
+            {
+                if (g_avatar[id] != nullptr)
+                {
+                    DropAvatar(id);
+                    g_bodyAt[id] = 0.0;
+                    g_beforeAt[id] = 0.0;
+                }
+                continue;
+            }
+
+            if (g_avatar[id] == nullptr)
+            {
+                // Where he says he is, not where the host happens to be standing.
+                g_avatar[id] = Mp::Bodies::Create(g_anchored[id].position);
+                g_avatarFacing[id] = g_anchored[id].facing;
+
+                if (g_avatar[id] == nullptr)
+                {
+                    continue;
+                }
+            }
+
+            const Mp::Input& pressed = g_pressed[id];
+            const int jump = (pressed.buttons & Mp::INPUT_JUMP) != 0 ? 1 : 0;
+
+            Mp::Bodies::Step(g_avatar[id], pressed.dirX, pressed.dirY, jump, seconds);
+
+            Mp::Body body = {};
+            int state = 0;
+            int subState = 0;
+
+            Mp::Bodies::Read(g_avatar[id], body.position, state, subState);
+
+            // Two simulations on two machines drift. While there is nothing reconciling them - that
+            // is stage 3 - the anchor is what stops a small difference becoming another room.
+            const float* const said = g_anchored[id].position;
+            float apart = 0.0f;
+
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const float gap = body.position[axis] - said[axis];
+                apart += gap * gap;
+            }
+
+            if (apart > g_settings.snap * g_settings.snap)
+            {
+                Mp::Bodies::Place(g_avatar[id], said);
+                Mp::Bodies::Read(g_avatar[id], body.position, state, subState);
+            }
+
+            if (pressed.dirX != 0)
+            {
+                g_avatarFacing[id] = pressed.dirX < 0 ? 1.5707963f : -1.5707963f;
+            }
+
+            body.id = id;
+            body.room = g_anchored[id].room;
+            body.facing = g_avatarFacing[id];
+            body.frame = pressed.frame;
+            body.state = static_cast<uint8_t>(state);
+            body.subState = static_cast<uint8_t>(subState);
+
+            RememberBody(body, id, true);
+        }
+    }
+
+    // Everything that belonged to one peer, gone at once. A BYE does this straight away rather
+    // than leaving his model standing there until the silence runs out.
+    void ForgetPeer(const Mp::Address& address)
+    {
+        const bool wasHost = g_host.IsSet() && g_host == address;
+
+        for (int at = 0; at < g_peerCount; ++at)
+        {
+            if (!(g_peers[at].address == address))
+            {
+                continue;
+            }
+
+            const uint8_t id = g_peers[at].id;
+
+            if (id != 0 && id <= MAX_PEERS)
+            {
+                g_bodyAt[id] = 0.0;
+                g_beforeAt[id] = 0.0;
+                DropAvatar(id);
+            }
+
+            g_peers[at] = g_peers[--g_peerCount];
+            break;
+        }
+
+        // The host is player 0 and is nobody's peer id, so his body has to be let go by hand.
+        if (wasHost)
+        {
+            g_bodyAt[0] = 0.0;
+            g_beforeAt[0] = 0.0;
+            g_host = Mp::Address{};
+            g_myId = 0;
+        }
+    }
+
     void DropSilentPeers()
     {
         const double now = Now();
@@ -649,6 +925,7 @@ namespace
             if (id != 0 && id <= MAX_PEERS)
             {
                 g_bodyAt[id] = 0.0;
+                DropAvatar(id);
             }
 
             g_peers[at] = g_peers[--g_peerCount];
@@ -667,11 +944,27 @@ namespace
 
         mine.id = g_myId;
 
+        if (!here)
+        {
+            DropAvatars();
+            g_jumpKeyCount = -1;
+        }
+
         // A client with no id yet would be writing itself into the host's slot.
         if (here && (g_isHost || g_myId != 0))
         {
-            RememberBody(mine, g_myId);
+            RememberBody(mine, g_myId, true);
         }
+
+        // Every frame, with the frame's own delta, the way the game steps its own player.
+        if (here && g_isHost)
+        {
+            StepAvatars(seconds, mine);
+        }
+
+        g_mine.tick = ++g_myTick;
+        g_mine.buttons = JumpHeld() ? Mp::INPUT_JUMP : 0;
+        g_mine.frame = mine.frame;
 
         g_sinceTick += seconds;
 
@@ -688,7 +981,19 @@ namespace
             }
             else if (here)
             {
-                SendMove(mine);
+                SendInput();
+            }
+        }
+
+        // Far rarer than the input, and only from a client actually in a level.
+        if (!g_isHost && here && g_settings.anchor > 0.0f)
+        {
+            g_sinceAnchor += seconds;
+
+            if (g_sinceAnchor >= 1.0f / g_settings.anchor)
+            {
+                g_sinceAnchor = 0.0f;
+                SendAnchor(mine);
             }
         }
 
@@ -803,6 +1108,8 @@ namespace
         Config::Add("mp_host", "-1");
         Config::Add("mp_stale", "5");
         Config::Add("mp_delay", "0.1");
+        Config::Add("mp_anchor", "4");
+        Config::Add("mp_snap", "0.35");
         Config::Add("mp_background", "1");
         Config::Add("mp_focus", "1");
         Config::Add("mp_loss", "0");
@@ -817,6 +1124,8 @@ namespace
         g_settings.host = static_cast<int>(Config::Number("mp_host", -1.0f));
         g_settings.stale = Config::Number("mp_stale", 5.0f);
         g_settings.delay = Config::Number("mp_delay", 0.10f);
+        g_settings.anchor = Config::Number("mp_anchor", 4.0f);
+        g_settings.snap = Config::Number("mp_snap", 0.35f);
         g_settings.background = Config::Number("mp_background", 1.0f) != 0.0f ? 1 : 0;
         g_settings.focus = Config::Number("mp_focus", 1.0f) != 0.0f ? 1 : 0;
 
@@ -835,6 +1144,16 @@ namespace
         if (g_settings.slots < 1 || g_settings.slots > MAX_PEERS)
         {
             g_settings.slots = 4;
+        }
+
+        if (g_settings.anchor < 0.5f || g_settings.anchor > 30.0f)
+        {
+            g_settings.anchor = 4.0f;
+        }
+
+        if (g_settings.snap <= 0.0f || g_settings.snap > 10.0f)
+        {
+            g_settings.snap = 0.35f;
         }
 
         if (g_settings.delay < 0.0f || g_settings.delay > 1.0f)
@@ -896,6 +1215,22 @@ namespace
         Console::Printf("mp: room %u, %d avatar(s) drawn, %d elsewhere, %d refused%s\n",
                         g_myRoom, g_drawn.queued, g_drawn.elsewhere, g_drawn.refused,
                         g_drawn.noModel ? ", no model" : (g_drawn.noView ? ", no camera" : ""));
+
+        if (Mp::Bodies::IsOpen())
+        {
+            int standing = 0;
+
+            for (int id = 0; id <= MAX_PEERS; ++id)
+            {
+                standing += g_avatar[id] != nullptr ? 1 : 0;
+            }
+
+            Console::Printf("mp: %d body(ies) stepped by the game\n", standing);
+        }
+        else
+        {
+            Console::Printf("mp: no bodies of our own (%s)\n", Mp::Bodies::Trouble());
+        }
 
         Console::Printf("mp: drawn %.0f ms behind, between snapshots\n", g_settings.delay * 1000.0f);
 
@@ -1245,6 +1580,10 @@ AMOD_EXPORT int __cdecl AmodInit(const AmodApi* api)
         Mp::Focus::Take();
     }
 
+    Mp::Bodies::Open();
+
+    Player::SetMoveHandler(&OnMove);
+
     Console::AddCommand("mp", &OnMpCommand);
 
     Log(AMOD_LOG_INFO, "%s is up as %s", ModId(), g_isHost ? "host" : "client");
@@ -1267,6 +1606,8 @@ AMOD_EXPORT void __cdecl AmodUpdate(const AmodFrame* frame)
 
 AMOD_EXPORT void __cdecl AmodShutdown(void)
 {
+    DropAvatars();
+    Mp::Bodies::Close();
     Mp::Focus::Release();
     Mp::Background::Release();
     Mp::Avatars::Forget();

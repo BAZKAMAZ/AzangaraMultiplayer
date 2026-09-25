@@ -7,18 +7,18 @@
 namespace Mp
 {
     // Checked on the first byte of everything that arrives. Bumped when any packet changes meaning.
-    const uint8_t                                                   PROTOCOL_VERSION = 2;
+    const uint8_t                                                   PROTOCOL_VERSION = 3;
 
     enum PacketType : uint8_t
     {
         PACKET_NONE = 0,
         PACKET_HELLO = 1,       // client -> host, until answered
         PACKET_WELCOME = 2,     // host -> client, in answer
-        PACKET_INPUT = 3,       // client -> host, every frame
+        PACKET_INPUT = 3,       // client -> host, what he is pressing
         PACKET_STATE = 4,       // host -> clients, 20-30 Hz
         PACKET_EVENT = 5,       // host -> clients, reliable
         PACKET_BYE = 6,         // either way, once
-        PACKET_MOVE = 7,        // client -> host, where he is. Gives way to INPUT at stage 2.
+        PACKET_MOVE = 7,        // client -> host, where he is. INPUT took over at stage 2.
     };
 
     // A dead body is still drawn; the game plays its death out.
@@ -38,6 +38,19 @@ namespace Mp
     };
 
     const int                                                       BODY_SIZE = 26;
+
+    const uint8_t                                                   INPUT_JUMP = 0x01;
+
+    struct                                                          Input
+    {
+        uint32_t                                                    tick;
+        int8_t                                                      dirX;
+        int8_t                                                      dirY;
+        uint8_t                                                     buttons;
+        float                                                       frame;
+    };
+
+    const int                                                       INPUT_SIZE = 11;
 
     // version, type, sequence
     const int                                                       HEADER_SIZE = 4;
@@ -298,6 +311,24 @@ namespace Mp
         writer.U8(body.state);
         writer.U8(body.subState);
         writer.U8(body.flags);
+    }
+
+    inline void                                                     WriteInput(Writer& writer, const Input& input)
+    {
+        writer.U32(input.tick);
+        writer.U8(static_cast<uint8_t>(input.dirX));
+        writer.U8(static_cast<uint8_t>(input.dirY));
+        writer.U8(input.buttons);
+        writer.Float(input.frame);
+    }
+
+    inline void                                                     ReadInput(Reader& reader, Input& input)
+    {
+        input.tick = reader.U32();
+        input.dirX = static_cast<int8_t>(reader.U8());
+        input.dirY = static_cast<int8_t>(reader.U8());
+        input.buttons = reader.U8();
+        input.frame = reader.Float();
     }
 
     inline void                                                     ReadBody(Reader& reader, Body& body)

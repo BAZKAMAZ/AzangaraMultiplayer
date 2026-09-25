@@ -1,5 +1,8 @@
 #include "Avatars.h"
 
+// Before ForgeApi, which hands out the device but declares nothing to call on it.
+#include <d3d8.h>
+
 #include <ForgeApi.h>
 #include <math.h>
 #include <stdio.h>
@@ -15,13 +18,6 @@ namespace Mp
         {
             const char* const MODEL_PATH = "models/player.mmd";
             const char* const SKIN_PATH = "textures/player_skin.jpg";
-
-            // One per id, so two players are told apart at a glance.
-            const uint32_t TINTS[8] =
-            {
-                0xFFFFFFFF, 0xFF80C0FF, 0xFF80FF90, 0xFFFFD070,
-                0xFFFF90C0, 0xFF90FFF0, 0xFFC090FF, 0xFFFF8060,
-            };
 
             float g_holdFrame = -1.0f;
 
@@ -42,40 +38,25 @@ namespace Mp
             bool g_pending = false;
             Drawn g_tally = {};
 
-            // Row vectors, the way the game holds them: translation in 12..14.
-            void Multiply(const float* a, const float* b, float* out)
+            void Place(const Body& body, D3DMATRIX& out)
             {
-                for (int row = 0; row < 4; ++row)
-                {
-                    for (int column = 0; column < 4; ++column)
-                    {
-                        out[row * 4 + column] =
-                            a[row * 4 + 0] * b[column] +
-                            a[row * 4 + 1] * b[4 + column] +
-                            a[row * 4 + 2] * b[8 + column] +
-                            a[row * 4 + 3] * b[12 + column];
-                    }
-                }
+                const float sine = sinf(body.facing);
+                const float cosine = cosf(body.facing);
+
+                memset(&out, 0, sizeof(out));
+
+                out._11 = cosine;
+                out._13 = -sine;
+                out._22 = 1.0f;
+                out._31 = sine;
+                out._33 = cosine;
+                out._41 = body.position[0];
+                out._42 = body.position[1];
+                out._43 = body.position[2];
+                out._44 = 1.0f;
             }
 
-            void Place(const Body& body, const float* view, float* out)
-            {
-                const float turn = body.facing;
-                const float sine = sinf(turn);
-                const float cosine = cosf(turn);
-
-                const float world[16] =
-                {
-                    cosine, 0.0f, -sine, 0.0f,
-                    0.0f,   1.0f,  0.0f, 0.0f,
-                    sine,   0.0f, cosine, 0.0f,
-                    body.position[0], body.position[1], body.position[2], 1.0f,
-                };
-
-                Multiply(world, view, out);
-            }
-
-            void Queue();
+            void DrawThem();
 
             void __cdecl OnPlayerDrawn(const AmodModelDrawInfo* info, void*)
             {
@@ -88,13 +69,13 @@ namespace Mp
                 if (g_pending)
                 {
                     g_pending = false;
-                    Queue();
+                    DrawThem();
                 }
             }
 
             AmodModelId Model();
 
-            void Queue()
+            void DrawThem()
             {
                 g_tally = Drawn{};
 
@@ -105,8 +86,18 @@ namespace Mp
                     return;
                 }
 
-                float view[16] = {};
-                if (!Mmd::View(view))
+                IDirect3DDevice8* const device = Render::Device();
+                if (device == nullptr)
+                {
+                    g_tally.noView = true;
+                    return;
+                }
+
+                AmodModel about = {};
+                const int frames = Mmd::Get(model, about) ? about.frameCount : 0;
+
+                D3DMATRIX was = {};
+                if (device->GetTransform(D3DTS_WORLD, &was) != D3D_OK)
                 {
                     g_tally.noView = true;
                     return;
@@ -122,16 +113,15 @@ namespace Mp
                         continue;
                     }
 
-                    AmodModelDraw draw = {};
-                    draw.structSize = sizeof(draw);
-                    draw.model = model;
-                    draw.texture = g_skin;
-                    draw.flags = AMOD_DRAW_HAS_MATRIX;
-                    Place(body, view, draw.matrix);
-                    draw.frame = g_holdFrame >= 0.0f ? g_holdFrame : body.frame;
-                    draw.tint = TINTS[body.id % 8];
+                    D3DMATRIX ours = {};
+                    Place(body, ours);
+                    device->SetTransform(D3DTS_WORLD, &ours);
 
-                    if (Mmd::Enqueue(draw))
+                    const float held = g_holdFrame >= 0.0f ? g_holdFrame : body.frame;
+                    const int first = frames > 0 ? static_cast<int>(held) % frames : 0;
+                    const int second = frames > 0 ? (first + 1) % frames : 0;
+
+                    if (Mmd::DrawFrames(model, first, second, held - static_cast<float>(first)))
                     {
                         ++g_tally.queued;
                     }
@@ -140,6 +130,8 @@ namespace Mp
                         ++g_tally.refused;
                     }
                 }
+
+                device->SetTransform(D3DTS_WORLD, &was);
             }
 
             // Models belong to the level, so the id goes stale on the way out of one.
@@ -217,7 +209,6 @@ namespace Mp
 
             g_pending = true;
 
-            // Nothing is drawn until the game draws him, so the model has to be in hand by then.
             Model();
         }
 
