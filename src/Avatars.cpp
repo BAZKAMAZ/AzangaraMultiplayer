@@ -117,11 +117,26 @@ namespace Mp
                     Place(body, ours);
                     device->SetTransform(D3DTS_WORLD, &ours);
 
-                    const float held = g_holdFrame >= 0.0f ? g_holdFrame : body.frame;
-                    const int first = frames > 0 ? static_cast<int>(held) % frames : 0;
-                    const int second = frames > 0 ? (first + 1) % frames : 0;
+                    // The two the game itself is blending, not a pair worked out from one
+                    // number: the frame after a movement's last is the start of another movement.
+                    int first = body.frameA;
+                    int second = body.frameB;
+                    float blend = static_cast<float>(body.blend) / 255.0f;
 
-                    if (Mmd::DrawFrames(model, first, second, held - static_cast<float>(first)))
+                    if (g_holdFrame >= 0.0f)
+                    {
+                        first = static_cast<int>(g_holdFrame);
+                        second = first;
+                        blend = 0.0f;
+                    }
+
+                    if (frames > 0)
+                    {
+                        first = first % frames;
+                        second = second % frames;
+                    }
+
+                    if (Mmd::DrawFrames(model, first, second, blend))
                     {
                         ++g_tally.queued;
                     }
@@ -188,10 +203,19 @@ namespace Mp
             out.subState = static_cast<uint8_t>(player.subState);
             out.flags = player.isDead != 0 ? BODY_DEAD : 0;
 
+            if (g_seenTheirs)
+            {
+                out.facing = atan2f(-g_theirs[2], g_theirs[0]);
+            }
+
             AmodAnimState anim = {};
             if (Mmd::GetEntityAnim(World::PlayerEntity(), anim))
             {
-                out.frame = static_cast<float>(anim.frameA) + static_cast<float>(anim.frameB - anim.frameA) * anim.blend;
+                const float blend = anim.blend < 0.0f ? 0.0f : (anim.blend > 1.0f ? 1.0f : anim.blend);
+
+                out.frameA = static_cast<uint16_t>(anim.frameA < 0 ? 0 : anim.frameA);
+                out.frameB = static_cast<uint16_t>(anim.frameB < 0 ? 0 : anim.frameB);
+                out.blend = static_cast<uint8_t>(blend * 255.0f + 0.5f);
             }
 
             return true;

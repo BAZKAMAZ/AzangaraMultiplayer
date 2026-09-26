@@ -12,13 +12,13 @@
 #include "Bodies.h"
 #include "Focus.h"
 #include "Net.h"
+#include "Room.h"
 #include "Protocol.h"
 
 using namespace Amod;
 
 namespace
 {
-    // settings, all out of Azangara.cfg
     struct Settings
     {
         char peer[128];     // mp_peer:  where to say hello; a bare address means mp_port
@@ -31,6 +31,13 @@ namespace
         float delay;        // mp_delay: how far behind the newest snapshot to draw
         float anchor;       // mp_anchor: how often a client says where he really is
         float snap;         // mp_snap: how far a body may drift before it is put right
+        float pull;         // mp_pull: how hard the host's answer pulls my own body over
+        float hard;         // mp_hard: past this the pull gives way to a plain move
+        int lag;            // mp_lag: milliseconds every packet is held on purpose
+        int world;          // mp_world: the room's moving parts are the host's
+        float worldRate;    // mp_wrate: how often the room itself is sent
+        int hold;           // mp_hold: a client takes them off its own game entirely
+        int touch;          // mp_touch: a stepped body meets plates, doors and fields
         int background;     // mp_background: keep running when the window is not in front
         int focus;          // mp_focus: take the keyboard only while in front
         int loss;           // mp_loss:  per cent of outgoing packets thrown away on purpose
@@ -48,7 +55,14 @@ namespace
         5.0f,
         0.10f,
         4.0f,
-        0.35f,
+        1.2f,
+        0.0f,
+        0.60f,
+        0,
+        1,
+        5.0f,
+        0,
+        1,
         1,
         1,
         0,
@@ -79,37 +93,75 @@ namespace
     bool g_running = false;
     uint16_t g_sequence = 0;
 
-    // The host is player 0 and hands out the rest.
+    // The host is player 0 and assigns the remaining ids.
     bool g_isHost = true;
 
     uint8_t g_myId = 0;
     Mp::Address g_host = {};
 
-    // Everyone, by id. The host fills these from MOVE, a client from STATE.
+    // Bodies are indexed by player id; the host fills them from MOVE and clients from STATE.
     Mp::Body g_bodies[MAX_PEERS + 1] = {};
     double g_bodyAt[MAX_PEERS + 1] = {};
 
     Mp::Body g_before[MAX_PEERS + 1] = {};
     double g_beforeAt[MAX_PEERS + 1] = {};
 
-    // Set for a body this copy worked out itself, which is every frame rather than every packet
+    // Marks bodies simulated locally every frame instead of from network packets.
     bool g_ours[MAX_PEERS + 1] = {};
 
-    // The host's side of a client: a body of our own, and the last thing he said he was pressing.
+    // Host-side data for each client body and its latest input.
     void* g_avatar[MAX_PEERS + 1] = {};
     Mp::Input g_pressed[MAX_PEERS + 1] = {};
     double g_pressedAt[MAX_PEERS + 1] = {};
+
+    // Track how long the host and client positions have disagreed.
+    double g_apartAt[MAX_PEERS + 1] = {};
+    const double APART_PATIENCE = 1.5;
     float g_avatarFacing[MAX_PEERS + 1] = {};
 
     Mp::Body g_anchored[MAX_PEERS + 1] = {};
     double g_anchoredAt[MAX_PEERS + 1] = {};
 
     float g_sinceAnchor = 0.0f;
+    float g_sinceWorld = 0.0f;
 
-    // A client that has said nothing for this long is not playing.
+    // The host's last position for this client, kept separate from local prediction.
+    Mp::Body g_saidOfMe = {};
+    double g_saidOfMeAt = 0.0;
+    uint16_t g_lastState = 0;
+    bool g_hadState = false;
+
+    uint64_t g_pulled = 0;
+    uint64_t g_moved = 0;
+
+    // Track position divergence and the last time the host copy could not reproduce an action.
+    double g_apartSince = 0.0;
+    double g_notWalkingAt = 0.0;
+
+    // Require a disagreement to persist before correcting the player.
+    const double PATIENCE = 0.5;
+
+    // Grace period after climbing or using a ladder before corrections are allowed.
+    const double GRACE = 1.0;
+
+    // Hold packets intentionally to simulate network delay and test smoothing.
+    struct Held
+    {
+        Mp::Address from;
+        double due;
+        int size;
+        uint8_t data[Mp::MAX_PACKET];
+    };
+
+    const int MAX_HELD = 64;
+
+    Held g_held[MAX_HELD] = {};
+    int g_heldCount = 0;
+
+    // Clients silent for this long are considered inactive.
     const double INPUT_FRESH = 0.5;
 
-    // What this copy is pressing, caught on its way through the player.
+    // The input captured from this local player's controls.
     Mp::Input g_mine = {};
     uint32_t g_myTick = 0;
 
@@ -135,7 +187,7 @@ namespace
 
     AmodToken g_frameToken = AMOD_INVALID_TOKEN;
 
-    // our own clock
+    // Local high-resolution clock.
 
     LARGE_INTEGER g_frequency = {};
     LARGE_INTEGER g_start = {};
@@ -157,7 +209,7 @@ namespace
         QueryPerformanceCounter(&at);
 
         return static_cast<double>(at.QuadPart - g_start.QuadPart) /
-               static_cast<double>(g_frequency.QuadPart);
+            static_cast<double>(g_frequency.QuadPart);
     }
 
     uint32_t NowMs()
@@ -165,7 +217,7 @@ namespace
         return static_cast<uint32_t>(Now() * 1000.0);
     }
 
-    // peers
+    // Peer management.
 
     uint8_t FreeId()
     {
@@ -276,7 +328,7 @@ namespace
         g_mine.dirY = static_cast<int8_t>(move->dirY);
     }
 
-    // sending
+    // Packet sending.
 
     bool ShouldLose()
     {
@@ -374,7 +426,7 @@ namespace
         const double span = g_bodyAt[id] - g_beforeAt[id];
         const double when = now - g_settings.delay;
 
-        // Ours is worked out every frame, so there is nothing between snapshots to find.
+        // Locally simulated bodies need no interpolation between snapshots.
         if (g_ours[id])
         {
             return latest;
@@ -397,13 +449,12 @@ namespace
         for (int axis = 0; axis < 3; ++axis)
         {
             body.position[axis] = was.position[axis] +
-                                  (latest.position[axis] - was.position[axis]) * part;
+                (latest.position[axis] - was.position[axis]) * part;
         }
 
-        const float step = latest.frame - was.frame;
-        body.frame = (step > -8.0f && step < 8.0f) ? was.frame + step * part : latest.frame;
+        // Interpolate animation from the same snapshot pair to avoid pose mixing.
 
-        // The short way round, or turning about-face would swing him the long way.
+        // Interpolate facing using the shortest rotation path.
         float turn = latest.facing - was.facing;
         while (turn > 3.14159265f)
         {
@@ -423,8 +474,7 @@ namespace
         return g_bodyAt[id] > 0.0 && (now - g_bodyAt[id]) < g_settings.stale;
     }
 
-    // Client -> host: where I really am. Rare next to the input, and only so the host can put my
-    // body down in the right place and keep it from wandering off.
+    // Client to host: send the local body's authoritative position anchor.
     void SendAnchor(const Mp::Body& body)
     {
         if (!g_host.IsSet())
@@ -444,7 +494,7 @@ namespace
         }
     }
 
-    // Client -> host: what I am pressing. Where I end up is the host's to work out.
+    // Client to host: send current input; the host calculates the resulting body position.
     void SendInput()
     {
         if (!g_host.IsSet())
@@ -464,7 +514,75 @@ namespace
         }
     }
 
-    // Host -> clients: everyone, including the host.
+    // Client to host: request host-side activation of objects changed locally.
+    void SendAsk(const uint32_t* ids, int count)
+    {
+        if (!g_host.IsSet() || ids == nullptr || count <= 0)
+        {
+            return;
+        }
+
+        uint8_t buffer[Mp::MAX_PACKET];
+        Mp::Writer writer(buffer, sizeof(buffer));
+
+        writer.Header(Mp::PACKET_ASK, g_sequence++);
+        writer.U8(static_cast<uint8_t>(count));
+
+        for (int at = 0; at < count; ++at)
+        {
+            writer.U32(ids[at]);
+        }
+
+        if (!writer.Overflowed())
+        {
+            SendTo(g_host, buffer, writer.Size());
+        }
+    }
+
+    // Host to clients: synchronize room objects as the host runs them.
+    void SendWorld(uint16_t room)
+    {
+        Mp::Room::Thing things[Mp::Room::MAX_THINGS];
+        const int count = Mp::Room::Read(things, Mp::Room::MAX_THINGS);
+
+        if (count == 0 || g_settings.world == 0)
+        {
+            return;
+        }
+
+        uint8_t buffer[Mp::MAX_PACKET];
+        Mp::Writer writer(buffer, sizeof(buffer));
+
+        writer.Header(Mp::PACKET_WORLD, g_sequence++);
+        writer.U16(room);
+        writer.U8(static_cast<uint8_t>(count));
+
+        for (int at = 0; at < count; ++at)
+        {
+            writer.U32(things[at].id);
+            writer.Float(things[at].position[0]);
+            writer.Float(things[at].position[1]);
+            writer.Float(things[at].position[2]);
+            writer.U8(things[at].flags);
+            writer.U32(static_cast<uint32_t>(things[at].state));
+            writer.Float(things[at].timer);
+        }
+
+        if (writer.Overflowed())
+        {
+            return;
+        }
+
+        for (int at = 0; at < g_peerCount; ++at)
+        {
+            if (g_peers[at].id != 0)
+            {
+                SendTo(g_peers[at].address, buffer, writer.Size());
+            }
+        }
+    }
+
+    // Host to clients: broadcast all live player bodies.
     void SendState()
     {
         uint8_t buffer[Mp::MAX_PACKET];
@@ -476,7 +594,7 @@ namespace
         writer.Header(Mp::PACKET_STATE, g_sequence++);
         writer.U32(NowMs());
 
-        // Counted first, so the count byte is right before the bodies go in.
+        // Count live bodies before writing them to the packet.
         for (int id = 0; id <= MAX_PEERS; ++id)
         {
             if (BodyIsLive(static_cast<uint8_t>(id), now))
@@ -509,7 +627,7 @@ namespace
         }
     }
 
-    // receiving
+    // Packet receiving.
 
     void ForgetPeer(const Mp::Address& address);
 
@@ -583,7 +701,7 @@ namespace
             Peer* const peer = RememberPeer(from, name);
             g_lastRtt = static_cast<int>(NowMs() - stamp);
 
-            // Only a host hands out an id, so this is also how a client learns which peer it is.
+            // Only the host assigns player ids; this tells the client its own id.
             if (id != 0 && !g_isHost)
             {
                 if (g_myId != id || !(g_host == from))
@@ -629,7 +747,7 @@ namespace
                 return;
             }
 
-            // An input from before the one in hand is a packet that overtook it on the way.
+            // Ignore an older input packet that arrived after a newer one.
             if (g_pressed[peer->id].tick == 0 || input.tick >= g_pressed[peer->id].tick)
             {
                 g_pressed[peer->id] = input;
@@ -666,14 +784,24 @@ namespace
             const uint32_t sent = reader.U32();
             const int count = reader.U8();
 
-            // The world is the host's; a host that took one would be reading its own back.
+            // The host owns the room state; it must not process its own STATE packet.
             if (reader.Bad() || g_isHost)
             {
                 ++g_ignored;
                 return;
             }
 
-            (void)sent;   // stage 3 interpolates between snapshots by this
+            (void)sent;
+
+            // Reject old snapshots using the wrapping sequence-number difference.
+            if (g_hadState && static_cast<int16_t>(sequence - g_lastState) <= 0)
+            {
+                ++g_ignored;
+                return;
+            }
+
+            g_lastState = sequence;
+            g_hadState = true;
 
             for (int at = 0; at < count; ++at)
             {
@@ -686,10 +814,83 @@ namespace
                     return;
                 }
 
-                // Mine comes back too; reconciling it is stage 3.
-                if (body.id != g_myId)
+                if (body.id == g_myId)
+                {
+                    // The local player's host state is used only for position reconciliation, not rendering.
+                    g_saidOfMe = body;
+                    g_saidOfMeAt = Now();
+                }
+                else
                 {
                     RememberBody(body, body.id);
+                }
+            }
+            break;
+        }
+
+        case Mp::PACKET_WORLD:
+        {
+            const uint16_t room = reader.U16();
+            const int count = reader.U8();
+
+            if (reader.Bad() || g_isHost || count > Mp::Room::MAX_THINGS)
+            {
+                ++g_ignored;
+                return;
+            }
+
+            Mp::Room::Thing things[Mp::Room::MAX_THINGS];
+
+            for (int at = 0; at < count; ++at)
+            {
+                things[at].id = reader.U32();
+                things[at].position[0] = reader.Float();
+                things[at].position[1] = reader.Float();
+                things[at].position[2] = reader.Float();
+                things[at].flags = reader.U8();
+                things[at].state = static_cast<int32_t>(reader.U32());
+                things[at].timer = reader.Float();
+            }
+
+            if (reader.Bad())
+            {
+                ++g_ignored;
+                return;
+            }
+
+            // Apply room updates only to the current room.
+            if (room == g_myRoom && g_settings.world != 0)
+            {
+                uint32_t wants[Mp::Room::MAX_THINGS];
+                const int wanted = Mp::Room::Apply(things, count, wants, Mp::Room::MAX_THINGS);
+
+                if (wanted > 0)
+                {
+                    SendAsk(wants, wanted);
+                }
+            }
+            break;
+        }
+
+        case Mp::PACKET_ASK:
+        {
+            const int count = reader.U8();
+
+            if (reader.Bad() || !g_isHost || count > Mp::Room::MAX_THINGS)
+            {
+                ++g_ignored;
+                return;
+            }
+
+            for (int at = 0; at < count; ++at)
+            {
+                const uint32_t id = reader.U32();
+                const int index = Ctrls::IndexOf(id);
+
+                if (!reader.Bad() && index >= 0)
+                {
+                    // The host applies the requested tag change; the next WORLD packet propagates it.
+                    Ctrls::SetTagOn(index, true);
                 }
             }
             break;
@@ -704,7 +905,7 @@ namespace
 
         default:
         {
-            // INPUT, STATE and EVENT are stages 1 and 2. Counted, not acted on.
+            // INPUT, STATE and EVENT are handled by earlier stages and are only counted here.
             if (g_settings.chatter)
             {
                 Console::Printf("mp: %s #%u from %s, %d bytes\n", Mp::PacketName(type), sequence, Mp::ToText(from), size);
@@ -712,6 +913,49 @@ namespace
             break;
         }
         }
+    }
+
+    // Release delayed packets in due-time order each frame.
+    void ReleaseHeld()
+    {
+        const double now = Now();
+
+        int kept = 0;
+
+        for (int at = 0; at < g_heldCount; ++at)
+        {
+            if (g_held[at].due <= now)
+            {
+                OnPacket(g_held[at].from, g_held[at].data, g_held[at].size);
+            }
+            else
+            {
+                if (kept != at)
+                {
+                    g_held[kept] = g_held[at];
+                }
+                ++kept;
+            }
+        }
+
+        g_heldCount = kept;
+    }
+
+    void Hold(const Mp::Address& from, const uint8_t* data, int size)
+    {
+        if (g_heldCount >= MAX_HELD)
+        {
+            // Drop packets when the intentional delay queue is full, matching packet loss behavior.
+            ++g_dropped;
+            return;
+        }
+
+        Held& one = g_held[g_heldCount++];
+
+        one.from = from;
+        one.due = Now() + g_settings.lag / 1000.0;
+        one.size = size;
+        memcpy(one.data, data, static_cast<size_t>(size));
     }
 
     void Pump(float seconds)
@@ -730,7 +974,14 @@ namespace
 
             if (size > 0)
             {
-                OnPacket(from, buffer, size);
+                if (g_settings.lag > 0)
+                {
+                    Hold(from, buffer, size);
+                }
+                else
+                {
+                    OnPacket(from, buffer, size);
+                }
                 continue;
             }
 
@@ -743,6 +994,8 @@ namespace
 
             break;
         }
+
+        ReleaseHeld();
 
         if (g_settings.rate <= 0.0f)
         {
@@ -802,8 +1055,7 @@ namespace
 
             const bool playing = (now - g_pressedAt[id]) < INPUT_FRESH && (now - g_anchoredAt[id]) < INPUT_FRESH;
 
-            // Another room is stage 5's business. Until then his body has no ground to stand on
-            // here, so it is put down rather than simulated against the wrong grid.
+            // Do not simulate a remote body against the wrong room grid.
             if (!playing || g_anchored[id].room != mine.room)
             {
                 if (g_avatar[id] != nullptr)
@@ -817,7 +1069,7 @@ namespace
 
             if (g_avatar[id] == nullptr)
             {
-                // Where he says he is, not where the host happens to be standing.
+                // Spawn the remote body at the position supplied by its anchor.
                 g_avatar[id] = Mp::Bodies::Create(g_anchored[id].position);
                 g_avatarFacing[id] = g_anchored[id].facing;
 
@@ -838,8 +1090,7 @@ namespace
 
             Mp::Bodies::Read(g_avatar[id], body.position, state, subState);
 
-            // Two simulations on two machines drift. While there is nothing reconciling them - that
-            // is stage 3 - the anchor is what stops a small difference becoming another room.
+            // Anchors correct persistent drift, not normal jumps or climbs; wait before snapping a real divergence.
             const float* const said = g_anchored[id].position;
             float apart = 0.0f;
 
@@ -849,21 +1100,34 @@ namespace
                 apart += gap * gap;
             }
 
-            if (apart > g_settings.snap * g_settings.snap)
+            if (apart <= g_settings.snap * g_settings.snap)
             {
-                Mp::Bodies::Place(g_avatar[id], said);
-                Mp::Bodies::Read(g_avatar[id], body.position, state, subState);
+                g_apartAt[id] = 0.0;
+            }
+            else
+            {
+                if (g_apartAt[id] <= 0.0)
+                {
+                    g_apartAt[id] = Now();
+                }
+
+                if ((Now() - g_apartAt[id]) > APART_PATIENCE)
+                {
+                    Mp::Bodies::Place(g_avatar[id], said);
+                    Mp::Bodies::Read(g_avatar[id], body.position, state, subState);
+                    g_apartAt[id] = 0.0;
+                }
             }
 
-            if (pressed.dirX != 0)
-            {
-                g_avatarFacing[id] = pressed.dirX < 0 ? 1.5707963f : -1.5707963f;
-            }
+            // Use the facing reported by the remote player.
+            g_avatarFacing[id] = pressed.facing;
 
             body.id = id;
             body.room = g_anchored[id].room;
             body.facing = g_avatarFacing[id];
-            body.frame = pressed.frame;
+            body.frameA = pressed.frameA;
+            body.frameB = pressed.frameB;
+            body.blend = pressed.blend;
             body.state = static_cast<uint8_t>(state);
             body.subState = static_cast<uint8_t>(subState);
 
@@ -871,8 +1135,7 @@ namespace
         }
     }
 
-    // Everything that belonged to one peer, gone at once. A BYE does this straight away rather
-    // than leaving his model standing there until the silence runs out.
+    // Remove everything belonging to a peer immediately when it disconnects.
     void ForgetPeer(const Mp::Address& address)
     {
         const bool wasHost = g_host.IsSet() && g_host == address;
@@ -897,9 +1160,11 @@ namespace
             break;
         }
 
-        // The host is player 0 and is nobody's peer id, so his body has to be let go by hand.
+        // Player 0 is the host and is not represented as a peer, so its body is cleared separately.
         if (wasHost)
         {
+            // Release room control when the host disconnects.
+            Mp::Room::LetGo();
             g_bodyAt[0] = 0.0;
             g_beforeAt[0] = 0.0;
             g_host = Mp::Address{};
@@ -932,6 +1197,82 @@ namespace
         }
     }
 
+    // Local movement stays predicted; reconcile toward the host with small pulls or a hard snap for large errors.
+    void Reconcile(const Mp::Body& mine, float seconds)
+    {
+        if (g_isHost || g_myId == 0 || g_saidOfMeAt <= 0.0 || g_settings.pull <= 0.0f)
+        {
+            return;
+        }
+
+        const double now = Now();
+
+        // Skip stale corrections and cross-room mismatches.
+        if ((now - g_saidOfMeAt) > 1.0 || g_saidOfMe.room != mine.room)
+        {
+            return;
+        }
+
+        // Do not correct position while climbing; wait until the player is on foot.
+        if (mine.state != AMOD_PLAYER_STATE_ONFOOT)
+        {
+            g_notWalkingAt = now;
+            g_apartSince = 0.0;
+            return;
+        }
+
+        if ((now - g_notWalkingAt) < GRACE)
+        {
+            return;
+        }
+
+        float gap[3] = {};
+        float apart = 0.0f;
+
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            gap[axis] = g_saidOfMe.position[axis] - mine.position[axis];
+            apart += gap[axis] * gap[axis];
+        }
+
+        apart = sqrtf(apart);
+
+        // Below this distance the two simulations are considered synchronized.
+        if (apart < 0.05f)
+        {
+            g_apartSince = 0.0;
+            return;
+        }
+
+        // Delay corrections because position changes also affect the game's movement and heading calculations.
+        if (g_apartSince <= 0.0)
+        {
+            g_apartSince = now;
+        }
+
+        if ((now - g_apartSince) < PATIENCE)
+        {
+            return;
+        }
+
+        if (apart >= g_settings.hard)
+        {
+            Player::SetPosition(g_saidOfMe.position[0], g_saidOfMe.position[1],
+                g_saidOfMe.position[2]);
+            g_apartSince = 0.0;
+            ++g_moved;
+            return;
+        }
+
+        // Use SetPositionOnly so correction does not erase the movement delta used by the game.
+        const float part = g_settings.pull * seconds > 1.0f ? 1.0f : g_settings.pull * seconds;
+
+        Player::SetPositionOnly(mine.position[0] + gap[0] * part,
+            mine.position[1] + gap[1] * part,
+            mine.position[2] + gap[2] * part);
+        ++g_pulled;
+    }
+
     void Tick(float seconds)
     {
         if (!g_running)
@@ -947,24 +1288,33 @@ namespace
         if (!here)
         {
             DropAvatars();
+            Mp::Room::LetGo();
             g_jumpKeyCount = -1;
         }
 
-        // A client with no id yet would be writing itself into the host's slot.
+        // A client without an id must not overwrite the host's player slot.
         if (here && (g_isHost || g_myId != 0))
         {
             RememberBody(mine, g_myId, true);
         }
 
-        // Every frame, with the frame's own delta, the way the game steps its own player.
+        // Advance the local player using the same frame delta as the game.
         if (here && g_isHost)
         {
             StepAvatars(seconds, mine);
         }
 
+        if (here)
+        {
+            Reconcile(mine, seconds);
+        }
+
         g_mine.tick = ++g_myTick;
         g_mine.buttons = JumpHeld() ? Mp::INPUT_JUMP : 0;
-        g_mine.frame = mine.frame;
+        g_mine.facing = mine.facing;
+        g_mine.frameA = mine.frameA;
+        g_mine.frameB = mine.frameB;
+        g_mine.blend = mine.blend;
 
         g_sinceTick += seconds;
 
@@ -985,7 +1335,19 @@ namespace
             }
         }
 
-        // Far rarer than the input, and only from a client actually in a level.
+        // Room state changes slowly, but querying objects repeatedly is expensive because it scans the entity list.
+        if (g_isHost && here && g_settings.world != 0 && g_settings.worldRate > 0.0f)
+        {
+            g_sinceWorld += seconds;
+
+            if (g_sinceWorld >= 1.0f / g_settings.worldRate)
+            {
+                g_sinceWorld = 0.0f;
+                SendWorld(mine.room);
+            }
+        }
+
+        // Send anchors much less often and only from clients currently in a level.
         if (!g_isHost && here && g_settings.anchor > 0.0f)
         {
             g_sinceAnchor += seconds;
@@ -1025,7 +1387,7 @@ namespace
         Pump(frame != nullptr ? frame->delta : 0.0f);
     }
 
-    // opening the socket
+    // Open the network socket.
 
     void BuildLoopbackTargets(const Mp::Address& peer)
     {
@@ -1109,7 +1471,14 @@ namespace
         Config::Add("mp_stale", "5");
         Config::Add("mp_delay", "0.1");
         Config::Add("mp_anchor", "4");
-        Config::Add("mp_snap", "0.35");
+        Config::Add("mp_snap", "1.2");
+        Config::Add("mp_pull", "0");
+        Config::Add("mp_hard", "0.6");
+        Config::Add("mp_lag", "0");
+        Config::Add("mp_world", "1");
+        Config::Add("mp_wrate", "5");
+        Config::Add("mp_hold", "0");
+        Config::Add("mp_touch", "1");
         Config::Add("mp_background", "1");
         Config::Add("mp_focus", "1");
         Config::Add("mp_loss", "0");
@@ -1125,7 +1494,23 @@ namespace
         g_settings.stale = Config::Number("mp_stale", 5.0f);
         g_settings.delay = Config::Number("mp_delay", 0.10f);
         g_settings.anchor = Config::Number("mp_anchor", 4.0f);
-        g_settings.snap = Config::Number("mp_snap", 0.35f);
+        g_settings.snap = Config::Number("mp_snap", 1.2f);
+        g_settings.pull = Config::Number("mp_pull", 0.0f);
+        g_settings.hard = Config::Number("mp_hard", 0.60f);
+        g_settings.lag = static_cast<int>(Config::Number("mp_lag", 0.0f));
+        g_settings.world = Config::Number("mp_world", 1.0f) != 0.0f ? 1 : 0;
+        g_settings.worldRate = Config::Number("mp_wrate", 5.0f);
+
+        if (g_settings.worldRate < 0.5f || g_settings.worldRate > 30.0f)
+        {
+            g_settings.worldRate = 5.0f;
+        }
+        g_settings.hold = Config::Number("mp_hold", 0.0f) != 0.0f ? 1 : 0;
+
+        g_settings.touch = Config::Number("mp_touch", 1.0f) != 0.0f ? 1 : 0;
+
+        Mp::Room::Hold(g_settings.hold != 0);
+        Mp::Bodies::Touching(g_settings.touch != 0);
         g_settings.background = Config::Number("mp_background", 1.0f) != 0.0f ? 1 : 0;
         g_settings.focus = Config::Number("mp_focus", 1.0f) != 0.0f ? 1 : 0;
 
@@ -1146,6 +1531,21 @@ namespace
             g_settings.slots = 4;
         }
 
+        if (g_settings.pull < 0.0f || g_settings.pull > 60.0f)
+        {
+            g_settings.pull = 0.0f;
+        }
+
+        if (g_settings.hard <= 0.0f || g_settings.hard > 10.0f)
+        {
+            g_settings.hard = 0.60f;
+        }
+
+        if (g_settings.lag < 0 || g_settings.lag > 1000)
+        {
+            g_settings.lag = 0;
+        }
+
         if (g_settings.anchor < 0.5f || g_settings.anchor > 30.0f)
         {
             g_settings.anchor = 4.0f;
@@ -1153,7 +1553,7 @@ namespace
 
         if (g_settings.snap <= 0.0f || g_settings.snap > 10.0f)
         {
-            g_settings.snap = 0.35f;
+            g_settings.snap = 1.2f;
         }
 
         if (g_settings.delay < 0.0f || g_settings.delay > 1.0f)
@@ -1186,13 +1586,13 @@ namespace
         else
         {
             Console::Printf("mp: port %u as '%s', %s\n", static_cast<unsigned>(g_socket.Port()), g_name,
-                            g_running ? "running" : "paused");
+                g_running ? "running" : "paused");
         }
 
         if (g_isHost)
         {
             Console::Printf("mp: host%s, player 0, %.0f bodies a second\n",
-                            g_settings.host < 0 ? " (took the first port)" : "", g_settings.tick);
+                g_settings.host < 0 ? " (took the first port)" : "", g_settings.tick);
         }
         else if (g_myId != 0)
         {
@@ -1213,8 +1613,8 @@ namespace
         Console::Printf("mp: pumped on %llu frame(s), the game ran a level on %llu\n", g_renderFrames, g_worldFrames);
 
         Console::Printf("mp: room %u, %d avatar(s) drawn, %d elsewhere, %d refused%s\n",
-                        g_myRoom, g_drawn.queued, g_drawn.elsewhere, g_drawn.refused,
-                        g_drawn.noModel ? ", no model" : (g_drawn.noView ? ", no camera" : ""));
+            g_myRoom, g_drawn.queued, g_drawn.elsewhere, g_drawn.refused,
+            g_drawn.noModel ? ", no model" : (g_drawn.noView ? ", no camera" : ""));
 
         if (Mp::Bodies::IsOpen())
         {
@@ -1232,12 +1632,36 @@ namespace
             Console::Printf("mp: no bodies of our own (%s)\n", Mp::Bodies::Trouble());
         }
 
+        if (!g_isHost && Mp::Room::Held() > 0)
+        {
+            Console::Printf("mp: %d of the room's things are watched; machines run themselves\n",
+                Mp::Room::Held());
+        }
+
         Console::Printf("mp: drawn %.0f ms behind, between snapshots\n", g_settings.delay * 1000.0f);
 
+        if (g_settings.lag > 0)
+        {
+            Console::Printf("mp: every packet held %d ms on purpose, %d waiting\n",
+                g_settings.lag, g_heldCount);
+        }
+
+        if (!g_isHost)
+        {
+            if (g_settings.pull <= 0.0f)
+            {
+                Console::Print("mp: my own body is nobody's to correct ('mp pull 3' hands it to the host)\n");
+            }
+            else
+            {
+                Console::Printf("mp: pulled over %llu time(s), moved outright %llu\n", g_pulled, g_moved);
+            }
+        }
+
         Console::Printf("mp: behind the front window the game %s, %s and %s\n",
-                        Mp::Background::IsOn() ? "keeps running" : "sleeps",
-                        Mp::Background::KeepsPlaying() ? "does not pause" : "PAUSES",
-                        Mp::Focus::IsOn() ? "lets go of the keys" : "still takes the keys");
+            Mp::Background::IsOn() ? "keeps running" : "sleeps",
+            Mp::Background::KeepsPlaying() ? "does not pause" : "PAUSES",
+            Mp::Focus::IsOn() ? "lets go of the keys" : "still takes the keys");
 
         for (int at = 0; at < g_targetCount; ++at)
         {
@@ -1250,7 +1674,7 @@ namespace
             const Peer& peer = g_peers[at];
 
             Console::Printf("mp: <- %s '%s', %d packet(s), %.1fs ago%s\n", Mp::ToText(peer.address), peer.name, peer.packets,
-                            now - peer.heardAt, peer.greeted ? ", answered" : "");
+                now - peer.heardAt, peer.greeted ? ", answered" : "");
         }
 
         if (g_peerCount == 0)
@@ -1294,10 +1718,10 @@ namespace
                 why = " ANOTHER ROOM";
             }
 
-            Console::Printf("mp: player %u room %u at %.1f %.1f %.1f, facing %.2f, frame %.1f, %.1fs ago%s\n",
-                            body.id, body.room,
-                            body.position[0], body.position[1], body.position[2],
-                            body.facing, body.frame, age, why);
+            Console::Printf("mp: player %u room %u at %.1f %.1f %.1f, facing %.2f, frames %u/%u, %.1fs ago%s\n",
+                body.id, body.room,
+                body.position[0], body.position[1], body.position[2],
+                body.facing, body.frameA, body.frameB, age, why);
             ++shown;
         }
 
@@ -1312,7 +1736,7 @@ namespace
         if (argc < 2)
         {
             Status();
-            Console::Print("mp: peer <addr[:port]> | host [1|0] | who | avatar | frame <n> | delay <s> | stale <s> | background [1|0] | focus [1|0] | hello | on | off | log | loss <0-100>\n");
+            Console::Print("mp: peer <addr[:port]> | host [1|0] | who | avatar | frame <n> | delay <s> | lag <ms> | pull <n> | snap <n> | ctrls | trace [1|0] | world [1|0] | hold [1|0] | touch [1|0] | stale <s> | background [1|0] | focus [1|0] | hello | on | off | log | loss <0-100>\n");
             return;
         }
 
@@ -1358,7 +1782,7 @@ namespace
                 g_isHost = g_settings.host != 0;
                 Config::Set("mp_host", g_settings.host);
 
-                // The ids were handed out under the old role and mean nothing now.
+                // These ids were assigned under the previous role and are no longer valid.
                 g_myId = 0;
                 g_host = Mp::Address{};
 
@@ -1395,7 +1819,7 @@ namespace
             }
 
             Console::Printf("mp: behind the front window the game %s\n",
-                            Mp::Background::IsOn() ? "keeps running" : "sleeps");
+                Mp::Background::IsOn() ? "keeps running" : "sleeps");
             return;
         }
 
@@ -1417,7 +1841,7 @@ namespace
             }
 
             Console::Printf("mp: a window behind %s\n",
-                            Mp::Focus::IsOn() ? "lets go of the keys" : "still takes the keys");
+                Mp::Focus::IsOn() ? "lets go of the keys" : "still takes the keys");
             return;
         }
 
@@ -1441,6 +1865,114 @@ namespace
             return;
         }
 
+        if (_stricmp(what, "trace") == 0)
+        {
+            const bool on = argc >= 3 && atoi(argv[2]) != 0;
+
+            Mp::Room::Trace(on);
+            Console::Printf("mp: every tag written is %s in forge.log\n", on ? "put" : "not put");
+            return;
+        }
+
+        if (_stricmp(what, "ctrls") == 0)
+        {
+            Mp::Room::Report(&PrintLine);
+            return;
+        }
+
+        if (_stricmp(what, "world") == 0)
+        {
+            if (argc >= 3)
+            {
+                g_settings.world = atoi(argv[2]) != 0 ? 1 : 0;
+                Config::Set("mp_world", g_settings.world);
+
+                if (g_settings.world == 0)
+                {
+                    Mp::Room::LetGo();
+                }
+            }
+
+            Console::Printf("mp: the room's moving parts are %s\n",
+                g_settings.world != 0 ? "the host's" : "each copy's own");
+            return;
+        }
+
+        if (_stricmp(what, "touch") == 0)
+        {
+            if (argc >= 3)
+            {
+                g_settings.touch = atoi(argv[2]) != 0 ? 1 : 0;
+                Config::Set("mp_touch", g_settings.touch);
+                Mp::Bodies::Touching(g_settings.touch != 0);
+            }
+
+            Console::Printf("mp: a stepped body %s what it stands in\n",
+                Mp::Bodies::IsTouching() ? "meets" : "walks through");
+            return;
+        }
+
+        if (_stricmp(what, "hold") == 0)
+        {
+            if (argc >= 3)
+            {
+                g_settings.hold = atoi(argv[2]) != 0 ? 1 : 0;
+                Config::Set("mp_hold", g_settings.hold);
+                Mp::Room::Hold(g_settings.hold != 0);
+            }
+
+            Console::Printf("mp: a client %s them off its own game\n",
+                Mp::Room::Holding() ? "takes" : "does not take");
+            return;
+        }
+
+        if (_stricmp(what, "lag") == 0)
+        {
+            if (argc >= 3)
+            {
+                const int asked = atoi(argv[2]);
+                g_settings.lag = (asked >= 0 && asked <= 1000) ? asked : 0;
+                Config::Set("mp_lag", g_settings.lag);
+
+                if (g_settings.lag == 0)
+                {
+                    g_heldCount = 0;
+                }
+            }
+
+            Console::Printf("mp: every packet is held %d ms before it is read\n", g_settings.lag);
+            return;
+        }
+
+        if (_stricmp(what, "snap") == 0)
+        {
+            if (argc >= 3)
+            {
+                const float asked = static_cast<float>(atof(argv[2]));
+
+                g_settings.snap = (asked > 0.0f && asked <= 10.0f) ? asked : 1.2f;
+                Config::Set("mp_snap", g_settings.snap);
+            }
+
+            Console::Printf("mp: a body is put back where he says he is past %.2f, and only after %.1fs\n",
+                g_settings.snap, APART_PATIENCE);
+            return;
+        }
+
+        if (_stricmp(what, "pull") == 0)
+        {
+            if (argc >= 3)
+            {
+                const float asked = static_cast<float>(atof(argv[2]));
+                g_settings.pull = (asked >= 0.0f && asked <= 60.0f) ? asked : 0.0f;
+                Config::Set("mp_pull", g_settings.pull);
+            }
+
+            Console::Printf("mp: my body is walked %.1f of the way over a second, moved outright past %.2f\n",
+                g_settings.pull, g_settings.hard);
+            return;
+        }
+
         if (_stricmp(what, "delay") == 0)
         {
             if (argc >= 3)
@@ -1451,7 +1983,7 @@ namespace
             }
 
             Console::Printf("mp: avatars are drawn %.0f ms behind; 0 draws the newest as it stands\n",
-                            g_settings.delay * 1000.0f);
+                g_settings.delay * 1000.0f);
             return;
         }
 
@@ -1465,7 +1997,7 @@ namespace
             }
 
             Console::Printf("mp: a body is drawn for %.1fs after it was last heard\n",
-                            g_settings.stale);
+                g_settings.stale);
             return;
         }
 
@@ -1606,6 +2138,7 @@ AMOD_EXPORT void __cdecl AmodUpdate(const AmodFrame* frame)
 
 AMOD_EXPORT void __cdecl AmodShutdown(void)
 {
+    Mp::Room::LetGo();
     DropAvatars();
     Mp::Bodies::Close();
     Mp::Focus::Release();

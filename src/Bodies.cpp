@@ -19,10 +19,34 @@ namespace Mp
             const uint32_t STATE_AT = 0x178;
             const uint32_t SUBSTATE_AT = 0x17C;
 
-            // Body_Step's branches, gated by the flags at body+0. Player_Spawn sets 0x5CF.
-            const uint32_t LADDER_FLAG = 0x40;
-            const uint32_t CHAIN_FLAG = 0x80;
-            const uint32_t PIPE_FLAG = 0x100;
+            const uint32_t DELTA_AT = 0x088;
+            const uint32_t TOUCHED_AT = 0x1BC;
+            const uint32_t PUSHED_AT = 0x1C0;
+            const uint32_t HIT_AT = 0x1C4;
+            const uint32_t COLLIDES_AT = 0x595;
+
+            // body[0x16] at 0x58: 0 on foot, 1 ladder, 2 chain, 3 pipe.
+            const int ON_FOOT = 0;
+            const int ON_CHAIN = 2;
+
+            // lookup at 0x0043D7C0 reads rows one to five of it looking for 'I'.
+            const uint32_t CHAIN_SEARCH_AT = BODY_AT + 0xB8 + 8 + 4;
+            const int CHAIN_SEARCH_SIZE = 20;
+
+            bool ChainInWindow(const uint8_t* body)
+            {
+                const uint8_t* const cells = body + CHAIN_SEARCH_AT;
+
+                for (int at = 0; at < CHAIN_SEARCH_SIZE; ++at)
+                {
+                    if (cells[at] == 'I')
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
 
             // Body_Step(body, dx, dy, jump, delta, flags)
             const char* const STEP_SIGNATURE =
@@ -36,6 +60,10 @@ namespace Mp
 
             const uint32_t PLAYER_OPERAND_AT = 2;
 
+            const char* const TOUCH_SIGNATURE =
+                "51 57 8B 7C 24 0C 80 BF B4 05 00 00 00 C6 44 24 07 00 0F 84 ?? ?? ?? ?? "
+                "83 BF 3C 01 00 00 00 0F 85 ?? ?? ?? ?? 53 55 56";
+
             // Entity_CollideRoomBoxes(body). Entities_Update calls it after every entity's own update
             const char* const COLLIDE_SIGNATURE =
                 "A1 ?? ?? ?? ?? 81 EC 44 01 00 00 55 85 C0 0F 84 ?? ?? ?? ?? "
@@ -43,9 +71,12 @@ namespace Mp
 
             typedef int(__cdecl* StepRoutine)(void* body, int dirX, int dirY, int jump, float delta, int flags);
             typedef char(__stdcall* CollideRoutine)(void* body);
+            typedef char(__cdecl* TouchRoutine)(void* entity);
 
             StepRoutine g_step = nullptr;
             CollideRoutine g_collide = nullptr;
+            TouchRoutine g_touch = nullptr;
+            bool g_touching = true;
             uintptr_t g_playerAt = 0;
             const char* g_trouble = "not opened";
 
@@ -89,6 +120,13 @@ namespace Mp
                 return false;
             }
 
+            const uintptr_t touch = Interop::Find(TOUCH_SIGNATURE);
+            if (touch == 0)
+            {
+                g_trouble = "Entities_ResolveTouches was not found";
+                return false;
+            }
+
             const uintptr_t anchor = Interop::Find(PLAYER_SIGNATURE);
             if (anchor == 0)
             {
@@ -105,18 +143,30 @@ namespace Mp
 
             g_step = reinterpret_cast<StepRoutine>(step);
             g_collide = reinterpret_cast<CollideRoutine>(collide);
+            g_touch = reinterpret_cast<TouchRoutine>(touch);
             g_playerAt = global;
             g_trouble = "";
 
-            Log(AMOD_LOG_INFO, "bodies are open (step 0x%08X, boxes 0x%08X, player at 0x%08X)",
-                step, collide, global);
+            Log(AMOD_LOG_INFO, "bodies are open (step 0x%08X, boxes 0x%08X, touches 0x%08X, player at 0x%08X)",
+                step, collide, touch, global);
             return true;
+        }
+
+        void Touching(bool on)
+        {
+            g_touching = on;
+        }
+
+        bool IsTouching()
+        {
+            return g_touching && g_touch != nullptr;
         }
 
         void Close()
         {
             g_step = nullptr;
             g_collide = nullptr;
+            g_touch = nullptr;
             g_playerAt = 0;
             g_trouble = "not opened";
         }
@@ -142,16 +192,7 @@ namespace Mp
                 return nullptr;
             }
 
-            uint32_t flags = 0;
-            memcpy(&flags, body + BODY_AT, sizeof(flags));
-            flags &= ~(LADDER_FLAG | CHAIN_FLAG | PIPE_FLAG);
-            memcpy(body + BODY_AT, &flags, sizeof(flags));
-
-            // And it starts on foot, whatever the player was doing when he was copied.
-            const int onFoot = 0;
-            memcpy(body + STATE_AT, &onFoot, sizeof(onFoot));
-            memcpy(body + SUBSTATE_AT, &onFoot, sizeof(onFoot));
-
+            // The ladder, chain and pipe branches are left switched on
             Place(body, position);
             return body;
         }
@@ -171,12 +212,71 @@ namespace Mp
             const int x = dirX < 0 ? -1 : (dirX > 0 ? 1 : 0);
             const int y = dirY < 0 ? -1 : (dirY > 0 ? 1 : 0);
 
-            void* const at = static_cast<uint8_t*>(body) + BODY_AT;
+            uint8_t* const entity = static_cast<uint8_t*>(body);
+
+            int state = 0;
+            memcpy(&state, entity + STATE_AT, sizeof(state));
+
+            if (state == ON_CHAIN && !ChainInWindow(entity))
+            {
+                const int onFoot = ON_FOOT;
+
+                memcpy(entity + STATE_AT, &onFoot, sizeof(onFoot));
+                memcpy(entity + SUBSTATE_AT, &onFoot, sizeof(onFoot));
+            }
+
+            // Before the step, exactly as Entities_Update does it for every entity it walks.
+            memcpy(entity + PREVIOUS_AT, entity + POSITION_AT, sizeof(float) * 3);
+            memcpy(entity + DELTA_AT, &delta, sizeof(delta));
+
+            void* const at = entity + BODY_AT;
             const int stopped = g_step(at, x, y, jump != 0 ? 1 : 0, delta, 0);
 
-            if (g_collide != nullptr)
+            const uint32_t nothing = 0;
+
+            memcpy(entity + HIT_AT, &nothing, sizeof(nothing));
+            memcpy(entity + TOUCHED_AT, &nothing, sizeof(nothing));
+            memcpy(entity + PUSHED_AT, &nothing, sizeof(nothing));
+
+            // Then the same two passes in the same order, and with the same shuffling of what was
+            // run into: each pass is handed a clear slate and what it fills is gathered up after.
+            uint32_t hit = 0;
+            uint32_t was = 0;
+
+            if (g_collide != nullptr && entity[COLLIDES_AT] != 0)
             {
+                memcpy(&was, entity + HIT_AT, sizeof(was));
+                memcpy(entity + HIT_AT, &nothing, sizeof(nothing));
+
                 g_collide(at);
+
+                memcpy(&hit, entity + HIT_AT, sizeof(hit));
+
+                uint32_t pushed = 0;
+                memcpy(&pushed, entity + PUSHED_AT, sizeof(pushed));
+                pushed |= hit;
+                memcpy(entity + PUSHED_AT, &pushed, sizeof(pushed));
+
+                hit |= was;
+                memcpy(entity + HIT_AT, &hit, sizeof(hit));
+            }
+
+            if (g_touching && g_touch != nullptr)
+            {
+                memcpy(&was, entity + HIT_AT, sizeof(was));
+                memcpy(entity + HIT_AT, &nothing, sizeof(nothing));
+
+                g_touch(body);
+
+                memcpy(&hit, entity + HIT_AT, sizeof(hit));
+
+                uint32_t touched = 0;
+                memcpy(&touched, entity + TOUCHED_AT, sizeof(touched));
+                touched |= hit;
+                memcpy(entity + TOUCHED_AT, &touched, sizeof(touched));
+
+                hit |= was;
+                memcpy(entity + HIT_AT, &hit, sizeof(hit));
             }
 
             return stopped;

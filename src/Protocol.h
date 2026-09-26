@@ -6,8 +6,7 @@
 
 namespace Mp
 {
-    // Checked on the first byte of everything that arrives. Bumped when any packet changes meaning.
-    const uint8_t                                                   PROTOCOL_VERSION = 3;
+    const uint8_t                                                   PROTOCOL_VERSION = 8;
 
     enum PacketType : uint8_t
     {
@@ -19,6 +18,8 @@ namespace Mp
         PACKET_EVENT = 5,       // host -> clients, reliable
         PACKET_BYE = 6,         // either way, once
         PACKET_MOVE = 7,        // client -> host, where he is. INPUT took over at stage 2.
+        PACKET_WORLD = 8,       // host -> clients, the room's own moving parts
+        PACKET_ASK = 9,         // client -> host, open this one for me too
     };
 
     // A dead body is still drawn; the game plays its death out.
@@ -31,13 +32,16 @@ namespace Mp
         uint16_t                                                    room;
         float                                                       position[3];
         float                                                       facing;
-        float                                                       frame;      // animation position
+
+        uint16_t                                                    frameA;
+        uint16_t                                                    frameB;
+        uint8_t                                                     blend;      // 0..255, A to B
         uint8_t                                                     state;
         uint8_t                                                     subState;
         uint8_t                                                     flags;
     };
 
-    const int                                                       BODY_SIZE = 26;
+    const int                                                       BODY_SIZE = 27;
 
     const uint8_t                                                   INPUT_JUMP = 0x01;
 
@@ -47,10 +51,16 @@ namespace Mp
         int8_t                                                      dirX;
         int8_t                                                      dirY;
         uint8_t                                                     buttons;
-        float                                                       frame;
+
+        float                                                       facing;
+
+        // His own animation, passed on rather than worked out again.
+        uint16_t                                                    frameA;
+        uint16_t                                                    frameB;
+        uint8_t                                                     blend;
     };
 
-    const int                                                       INPUT_SIZE = 11;
+    const int                                                       INPUT_SIZE = 16;
 
     // version, type, sequence
     const int                                                       HEADER_SIZE = 4;
@@ -307,7 +317,9 @@ namespace Mp
         writer.Float(body.position[1]);
         writer.Float(body.position[2]);
         writer.Float(body.facing);
-        writer.Float(body.frame);
+        writer.U16(body.frameA);
+        writer.U16(body.frameB);
+        writer.U8(body.blend);
         writer.U8(body.state);
         writer.U8(body.subState);
         writer.U8(body.flags);
@@ -319,7 +331,10 @@ namespace Mp
         writer.U8(static_cast<uint8_t>(input.dirX));
         writer.U8(static_cast<uint8_t>(input.dirY));
         writer.U8(input.buttons);
-        writer.Float(input.frame);
+        writer.Float(input.facing);
+        writer.U16(input.frameA);
+        writer.U16(input.frameB);
+        writer.U8(input.blend);
     }
 
     inline void                                                     ReadInput(Reader& reader, Input& input)
@@ -328,7 +343,10 @@ namespace Mp
         input.dirX = static_cast<int8_t>(reader.U8());
         input.dirY = static_cast<int8_t>(reader.U8());
         input.buttons = reader.U8();
-        input.frame = reader.Float();
+        input.facing = reader.Float();
+        input.frameA = reader.U16();
+        input.frameB = reader.U16();
+        input.blend = reader.U8();
     }
 
     inline void                                                     ReadBody(Reader& reader, Body& body)
@@ -339,7 +357,9 @@ namespace Mp
         body.position[1] = reader.Float();
         body.position[2] = reader.Float();
         body.facing = reader.Float();
-        body.frame = reader.Float();
+        body.frameA = reader.U16();
+        body.frameB = reader.U16();
+        body.blend = reader.U8();
         body.state = reader.U8();
         body.subState = reader.U8();
         body.flags = reader.U8();

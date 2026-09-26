@@ -11,6 +11,9 @@ namespace Mp
         void                                                        Close();
         bool                                                        IsOpen();
 
+        void                                                        Touching(bool on);
+        bool                                                        IsTouching();
+
         void*                                                       Create(const float position[3]);
         void                                                        Destroy(void* body);
 
