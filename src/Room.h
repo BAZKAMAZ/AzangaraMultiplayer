@@ -10,10 +10,10 @@ namespace Mp
         const uint8_t THING_TAG_ON = 0x01;   // a door open, a field on
         const uint8_t THING_HIDDEN = 0x02;
 
-        // Only host-changed objects need position sync; other objects keep their own game updates.
+        // Only host-changed objects need position sync; others keep their own updates.
         const uint8_t THING_MOVES = 0x04;
 
-        // Sync the object's live state and timer instead of forcing its position every frame.
+        // Sync live state and timer instead of forcing the object's position every frame.
         const uint8_t THING_HAS_STATE = 0x08;
 
         // Sync a machine's timer when present; doors without one use direct state changes.
@@ -31,11 +31,30 @@ namespace Mp
         const int                                                   MAX_THINGS = 24;
         const int                                                   THING_SIZE = 25;
 
+        // Monster movers are keyed by placement, which stays the same across machines.
+        const uint8_t                                               MOVER_PHASE = 0x01;
+
+        struct                                                      Mover
+        {
+            uint8_t                                                 placed;
+            float                                                   position[3];
+            int8_t                                                  facing;
+
+            uint8_t                                                 has;
+            float                                                   phase;
+        };
+
+        const int                                                   MAX_MOVERS = 32;
+        const int                                                   MOVER_SIZE = 19;
+
         int                                                         Read(Thing* out, int max);
         int                                                         Apply(const Thing* things, int count, uint32_t* wants, int maxWants);
 
+        // Monster movers only exist in the room a player is currently in.
+        int                                                         ReadMovers(Mover* out, int max);
+        void                                                        ApplyMovers(const Mover* movers, int count);
+
         void                                                        Hold(bool freeze);
-        void                                                        Trace(bool on);
         void                                                        Trace(bool on);
         bool                                                        Holding();
 

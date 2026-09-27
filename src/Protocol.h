@@ -6,7 +6,7 @@
 
 namespace Mp
 {
-    const uint8_t                                                   PROTOCOL_VERSION = 8;
+    const uint8_t                                                   PROTOCOL_VERSION = 12;
 
     enum PacketType : uint8_t
     {
@@ -14,12 +14,13 @@ namespace Mp
         PACKET_HELLO = 1,       // client -> host, until answered
         PACKET_WELCOME = 2,     // host -> client, in answer
         PACKET_INPUT = 3,       // client -> host, what he is pressing
-        PACKET_STATE = 4,       // host -> clients, 20-30 Hz
+        PACKET_STATE = 4,       // host -> clients, 20-30 Hz, and who runs which room
         PACKET_EVENT = 5,       // host -> clients, reliable
         PACKET_BYE = 6,         // either way, once
         PACKET_MOVE = 7,        // client -> host, where he is. INPUT took over at stage 2.
-        PACKET_WORLD = 8,       // host -> clients, the room's own moving parts
+        PACKET_WORLD = 8,       // whoever runs the room -> everybody else in it
         PACKET_ASK = 9,         // client -> host, open this one for me too
+        PACKET_SPENT = 10,      // host -> clients, what the level has already given up
     };
 
     // A dead body is still drawn; the game plays its death out.

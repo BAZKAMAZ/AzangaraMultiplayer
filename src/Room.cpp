@@ -24,11 +24,18 @@ namespace Mp
                 int index;
                 bool asked;
 
-                // Use the loader's state property, falling back to shown for disappearing platforms.
+                // Doors are synchronized through the spent list instead of this packet.
+                bool isDoor;
+
+                // Moving objects sync their position after they are detected as movers.
+                bool moves;
+                float was[3];
+
+                // Use state, or shown for disappearing platforms, plus an optional timer.
                 const char* phase;
                 bool hasTimer;
 
-                // Track when phases diverge; timer-driven fields are corrected only if needed.
+                // Track phase divergence and apply delayed corrections when needed.
                 DWORD sinceApart;
                 bool theirs;
                 bool ours;
@@ -41,6 +48,19 @@ namespace Mp
 
             bool g_trace = false;
 
+            // Positions within this distance are considered equal.
+            const float SAME = 0.02f;
+
+            // Larger gaps are corrected immediately.
+            const float TOO_FAR = 1.0f;
+
+            bool Apart(float mine, float theirs)
+            {
+                const float gap = mine - theirs;
+
+                return gap > SAME || gap < -SAME;
+            }
+
             Known* Find(AmodCtrlId id)
             {
                 for (int at = 0; at < g_knownCount; ++at)
@@ -52,6 +72,25 @@ namespace Mp
                 }
 
                 return nullptr;
+            }
+
+            const int DOOR_KIND = 2;
+
+            bool IsDoor(AmodCtrlId id)
+            {
+                const int count = Ctrls::PlacementCount();
+
+                for (int at = 0; at < count; ++at)
+                {
+                    AmodCtrlPlacement placement = {};
+
+                    if (Ctrls::GetPlacement(at, placement) && placement.id == id)
+                    {
+                        return placement.kind == DOOR_KIND;
+                    }
+                }
+
+                return false;
             }
         }
 
@@ -74,6 +113,39 @@ namespace Mp
                     continue;
                 }
 
+                // Read available state and timer properties once because property checks scan the entity list.
+                Known* known = Find(ctrl.id);
+
+                if (known == nullptr && g_knownCount < MAX_THINGS)
+                {
+                    known = &g_known[g_knownCount++];
+                    *known = Known{};
+                    known->id = ctrl.id;
+                    known->index = at;
+                    known->isDoor = IsDoor(ctrl.id);
+                    known->was[0] = ctrl.position[0];
+                    known->was[1] = ctrl.position[1];
+                    known->was[2] = ctrl.position[2];
+                }
+
+                if (known != nullptr ? known->isDoor : IsDoor(ctrl.id))
+                {
+                    continue;
+                }
+
+                if (known != nullptr)
+                {
+                    // Once movement is detected, keep syncing this object's position.
+                    known->moves = known->moves ||
+                        Apart(known->was[0], ctrl.position[0]) ||
+                        Apart(known->was[1], ctrl.position[1]) ||
+                        Apart(known->was[2], ctrl.position[2]);
+
+                    known->was[0] = ctrl.position[0];
+                    known->was[1] = ctrl.position[1];
+                    known->was[2] = ctrl.position[2];
+                }
+
                 Thing& thing = out[written++];
 
                 thing.id = ctrl.id;
@@ -84,15 +156,9 @@ namespace Mp
                 thing.state = 0;
                 thing.timer = 0.0f;
 
-                // Read available state and timer properties once because property checks scan the entity list.
-                Known* known = Find(ctrl.id);
-
-                if (known == nullptr && g_knownCount < MAX_THINGS)
+                if (known != nullptr && known->moves)
                 {
-                    known = &g_known[g_knownCount++];
-                    *known = Known{};
-                    known->id = ctrl.id;
-                    known->index = at;
+                    thing.flags |= THING_MOVES;
                 }
 
                 if (known != nullptr && !known->asked)
@@ -136,6 +202,156 @@ namespace Mp
             return written;
         }
 
+        namespace
+        {
+            // Monster live fields are accessed through the underlying property interface.
+            void Put(int index, const char* key, const AmodValue& value)
+            {
+                if (Monsters::g_monsters != nullptr && Monsters::g_monsters->SetProperty != nullptr)
+                {
+                    Monsters::g_monsters->SetProperty(Monsters::g_monsterSelf, index, key, &value);
+                }
+            }
+
+            bool Peek(int index, const char* key, AmodValue& value)
+            {
+                return Monsters::g_monsters != nullptr &&
+                    Monsters::g_monsters->GetProperty != nullptr &&
+                    Monsters::g_monsters->GetProperty(Monsters::g_monsterSelf, index, key, &value) != 0;
+            }
+
+            // The bat uses a phase-driven circular movement.
+            bool Circles(const char* moves)
+            {
+                return moves != nullptr && strcmp(moves, "bat") == 0;
+            }
+
+        }
+
+        int ReadMovers(Mover* out, int max)
+        {
+            if (out == nullptr || !Monsters::IsAvailable())
+            {
+                return 0;
+            }
+
+            const int count = Monsters::Count();
+            int written = 0;
+
+            for (int at = 0; at < count && written < max; ++at)
+            {
+                AmodMonster monster = {};
+
+                if (!Monsters::Get(at, monster) || monster.placed < 0 ||
+                    monster.placed >= MAX_MOVERS * 8)
+                {
+                    continue;
+                }
+
+                Mover& mover = out[written++];
+
+                mover.placed = static_cast<uint8_t>(monster.placed);
+                mover.position[0] = monster.position[0];
+                mover.position[1] = monster.position[1];
+                mover.position[2] = monster.position[2];
+                mover.facing = static_cast<int8_t>(monster.facing);
+                mover.has = 0;
+                mover.phase = 0.0f;
+
+                AmodValue value = {};
+
+                if (Circles(monster.moves) && Peek(at, "phase", value) && value.kind == AMOD_VALUE_FLOAT && value.count > 0)
+                {
+                    mover.has |= MOVER_PHASE;
+                    mover.phase = value.numbers[0];
+                }
+            }
+
+            return written;
+        }
+
+        void ApplyMovers(const Mover* movers, int count)
+        {
+            if (movers == nullptr || !Monsters::IsAvailable())
+            {
+                return;
+            }
+
+            // Cache the room's monsters because each loader lookup scans the live entity list.
+            const int live = Monsters::Count();
+            AmodMonster here[MAX_MOVERS] = {};
+            int found = 0;
+
+            for (int at = 0; at < live && found < MAX_MOVERS; ++at)
+            {
+                if (Monsters::Get(at, here[found]))
+                {
+                    ++found;
+                }
+            }
+
+            for (int at = 0; at < count; ++at)
+            {
+                const Mover& mover = movers[at];
+
+                for (int which = 0; which < found; ++which)
+                {
+                    const AmodMonster& monster = here[which];
+
+                    if (monster.placed < 0 || static_cast<uint8_t>(monster.placed) != mover.placed)
+                    {
+                        continue;
+                    }
+
+                    // Sync circular movers by phase; other monsters are corrected by position.
+                    if ((mover.has & MOVER_PHASE) != 0)
+                    {
+                        Put(monster.index, "phase", Value(mover.phase));
+
+                        if (monster.facing != mover.facing)
+                        {
+                            Put(monster.index, "facing", Value(static_cast<int>(mover.facing)));
+                        }
+
+                        break;
+                    }
+
+                    // Pull normal movers toward the host position instead of forcing them there.
+                    static const char* const AXIS[3] = { "x", "y", "z" };
+                    float gap[3] = {};
+                    float worst = 0.0f;
+
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        gap[axis] = mover.position[axis] - monster.position[axis];
+                        worst = (gap[axis] > worst) ? gap[axis] : (-gap[axis] > worst ? -gap[axis] : worst);
+                    }
+
+                    if (worst > SAME)
+                    {
+                        const float part = worst > TOO_FAR ? 1.0f : 0.35f;
+
+                        // Write position only when the difference is large enough to matter.
+                        for (int axis = 0; axis < 3; ++axis)
+                        {
+                            if (Apart(monster.position[axis], mover.position[axis]))
+                            {
+                                Put(monster.index, AXIS[axis], 
+                                    Value(monster.position[axis] + gap[axis] * part));
+                            }
+                        }
+                    }
+
+                    if (monster.facing != mover.facing)
+                    {
+                        Put(monster.index, "facing", Value(static_cast<int>(mover.facing)));
+                    }
+
+                    break;
+                }
+            }
+        }
+
         int Apply(const Thing* things, int count, uint32_t* wants, int maxWants)
         {
             int wanted = 0;
@@ -164,11 +380,17 @@ namespace Mp
                     *known = Known{};
                     known->id = thing.id;
                     known->index = -1;
+                    known->isDoor = IsDoor(thing.id);
+                }
+
+                if (known->isDoor)
+                {
+                    continue;
                 }
 
                 AmodCtrl here = {};
 
-                // Reuse the cached ctrl index until it stops matching the expected entity.
+                // Reuse the cached ctrl index until the entity no longer matches.
                 if (known->index < 0 || !Ctrls::Get(known->index, here) || here.id != thing.id)
                 {
                     known->index = Ctrls::IndexOf(thing.id);
@@ -184,7 +406,29 @@ namespace Mp
                 const bool theirs = (thing.flags & THING_TAG_ON) != 0;
                 const bool ours = here.tagOn != 0;
 
-                // Sync the machine's state instead of its position so both copies keep running their own script.
+                // Moving objects are corrected toward the host position instead of being snapped every frame.
+                if ((thing.flags & THING_MOVES) != 0)
+                {
+                    float gap[3] = {};
+                    float worst = 0.0f;
+
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        gap[axis] = thing.position[axis] - here.position[axis];
+                        worst = (gap[axis] > worst) ? gap[axis] : (-gap[axis] > worst ? -gap[axis] : worst);
+                    }
+
+                    if (worst > SAME)
+                    {
+                        const float part = worst > TOO_FAR ? 1.0f : 0.35f;
+                        Ctrls::SetPosition(index,
+                            here.position[0] + gap[0] * part,
+                            here.position[1] + gap[1] * part,
+                            here.position[2] + gap[2] * part);
+                    }
+                }
+
+                // Sync machine state instead of position so each copy keeps running its own script.
                 if (!known->asked)
                 {
                     AmodValue first = {};
@@ -206,8 +450,8 @@ namespace Mp
 
                 AmodValue value = {};
 
-                // Keep the timer in sync because it controls the machine's next state change.
-                if (known->hasTimer && (thing.flags & THING_HAS_TIMER) != 0 &&  Ctrls::GetProperty(index, "timer", value) && value.kind == AMOD_VALUE_FLOAT &&
+                // Keep the timer synchronized because it controls the next machine state change.
+                if (known->hasTimer && (thing.flags & THING_HAS_TIMER) != 0 && Ctrls::GetProperty(index, "timer", value) && value.kind == AMOD_VALUE_FLOAT &&
                     value.count > 0)
                 {
                     const float gap = value.numbers[0] - thing.timer;
@@ -218,11 +462,10 @@ namespace Mp
                     }
                 }
 
-                if (known->phase != nullptr && (thing.flags & THING_HAS_STATE) != 0 && Ctrls::GetProperty(index, known->phase, value) && 
-                    value.kind == AMOD_VALUE_INT &&
-                    value.integer != thing.state)
+                if (known->phase != nullptr && (thing.flags & THING_HAS_STATE) != 0 && Ctrls::GetProperty(index, known->phase, value) 
+                    && value.kind == AMOD_VALUE_INT && value.integer != thing.state)
                 {
-                    // Timer-driven machines are allowed to reach the target phase naturally; doors are set directly.
+                    // Let timer-driven machines reach their phase naturally; set other states directly.
                     const bool waitForIt = known->hasTimer;
 
                     if (known->sinceApart == 0)
@@ -273,7 +516,7 @@ namespace Mp
                     continue;
                 }
 
-                // Send tag changes only when the host value changes; otherwise let the object run itself.
+                // Sync tag changes only when the host value changes.
                 if (theirs != known->theirs)
                 {
                     if (g_trace)

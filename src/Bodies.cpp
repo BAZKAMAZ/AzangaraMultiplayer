@@ -19,6 +19,18 @@ namespace Mp
             const uint32_t STATE_AT = 0x178;
             const uint32_t SUBSTATE_AT = 0x17C;
 
+            // Player_Spawn puts Player_Die here, and everything that kills reads it back out.
+            const uint32_t DIE_AT = 0x5C4;
+
+            const uint32_t MARKS_AT = 0x590; // State markers
+            const uint32_t TAKEN_AT = 0x594; // death screen
+            const uint32_t HURT_AT = 0x25C; // fire count
+
+            const uint32_t DEAD_MARK = 0x01;
+            const uint32_t CRASHED_MARK = 0x02;
+            const uint32_t BURNING_MARK = 0x04;
+            const uint32_t SHOCKED_MARK = 0x08;
+
             const uint32_t DELTA_AT = 0x088;
             const uint32_t TOUCHED_AT = 0x1BC;
             const uint32_t PUSHED_AT = 0x1C0;
@@ -32,6 +44,10 @@ namespace Mp
             // lookup at 0x0043D7C0 reads rows one to five of it looking for 'I'.
             const uint32_t CHAIN_SEARCH_AT = BODY_AT + 0xB8 + 8 + 4;
             const int CHAIN_SEARCH_SIZE = 20;
+
+            void __cdecl NoDeath(void*, int)
+            {
+            }
 
             bool ChainInWindow(const uint8_t* body)
             {
@@ -192,7 +208,10 @@ namespace Mp
                 return nullptr;
             }
 
-            // The ladder, chain and pipe branches are left switched on
+            // Keep ladder, chain and pipe handlers, but replace the death handler so client deaths never kill the host player.
+            const void* const nothing = reinterpret_cast<const void*>(&NoDeath);
+            memcpy(body + DIE_AT, &nothing, sizeof(nothing));
+
             Place(body, position);
             return body;
         }
@@ -238,8 +257,6 @@ namespace Mp
             memcpy(entity + TOUCHED_AT, &nothing, sizeof(nothing));
             memcpy(entity + PUSHED_AT, &nothing, sizeof(nothing));
 
-            // Then the same two passes in the same order, and with the same shuffling of what was
-            // run into: each pass is handed a clear slate and what it fills is gathered up after.
             uint32_t hit = 0;
             uint32_t was = 0;
 
@@ -278,6 +295,22 @@ namespace Mp
                 hit |= was;
                 memcpy(entity + HIT_AT, &hit, sizeof(hit));
             }
+
+            // Nothing that hits this copy is allowed to stick; deaths are handled by the local player.
+            uint32_t marks = 0;
+            memcpy(&marks, entity + MARKS_AT, sizeof(marks));
+
+            if ((marks & (DEAD_MARK | CRASHED_MARK | BURNING_MARK | SHOCKED_MARK)) != 0)
+            {
+                marks &= ~(DEAD_MARK | CRASHED_MARK | BURNING_MARK | SHOCKED_MARK);
+                memcpy(entity + MARKS_AT, &marks, sizeof(marks));
+            }
+
+            const uint8_t alive = 0;
+            const float unhurt = 0.0f;
+
+            memcpy(entity + TAKEN_AT, &alive, sizeof(alive));
+            memcpy(entity + HURT_AT, &unhurt, sizeof(unhurt));
 
             return stopped;
         }
