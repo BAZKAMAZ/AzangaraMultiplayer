@@ -6,7 +6,7 @@
 
 namespace Mp
 {
-    const uint8_t                                                   PROTOCOL_VERSION = 12;
+    const uint8_t                                                   PROTOCOL_VERSION = 14;
 
     enum PacketType : uint8_t
     {
@@ -26,10 +26,13 @@ namespace Mp
     // A dead body is still drawn; the game plays its death out.
     const uint8_t                                                   BODY_DEAD = 0x01;
 
-    // One player as the wire carries him. 26 bytes.
+    // One player as the wire carries him.
     struct                                                          Body
     {
         uint8_t                                                     id;
+
+        uint32_t                                                    level;
+
         uint16_t                                                    room;
         float                                                       position[3];
         float                                                       facing;
@@ -42,7 +45,7 @@ namespace Mp
         uint8_t                                                     flags;
     };
 
-    const int                                                       BODY_SIZE = 27;
+    const int                                                       BODY_SIZE = 31;
 
     const uint8_t                                                   INPUT_JUMP = 0x01;
 
@@ -313,6 +316,7 @@ namespace Mp
     inline void                                                     WriteBody(Writer& writer, const Body& body)
     {
         writer.U8(body.id);
+        writer.U32(body.level);
         writer.U16(body.room);
         writer.Float(body.position[0]);
         writer.Float(body.position[1]);
@@ -353,6 +357,7 @@ namespace Mp
     inline void                                                     ReadBody(Reader& reader, Body& body)
     {
         body.id = reader.U8();
+        body.level = reader.U32();
         body.room = reader.U16();
         body.position[0] = reader.Float();
         body.position[1] = reader.Float();

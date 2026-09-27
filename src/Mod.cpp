@@ -13,6 +13,7 @@
 #include "Focus.h"
 #include "Net.h"
 #include "Room.h"
+#include "Menus.h"
 #include "Spent.h"
 #include "Protocol.h"
 
@@ -146,6 +147,32 @@ namespace
     }
 
     const double ANCHOR_FRESH = 1.5;
+
+    uint32_t MyLevel()
+    {
+        AmodWorldLevel level = {};
+
+        if (!World::IsLevelLoaded() || !World::GetLevel(level))
+        {
+            return 0;
+        }
+
+        uint32_t key = 2166136261u;
+
+        for (const char* at = level.script; at != nullptr && *at != 0; ++at)
+        {
+            key = (key ^ static_cast<uint8_t>(*at)) * 16777619u;
+        }
+
+        return (key & 0xFFFF0000u) | (static_cast<uint32_t>(level.number) & 0xFFFFu);
+    }
+
+    uint32_t g_myLevel = 0;
+
+    bool SameLevel(uint32_t level)
+    {
+        return level != 0 && level == g_myLevel;
+    }
 
     bool IRun(uint16_t room)
     {
@@ -520,10 +547,11 @@ namespace
         {
             const uint8_t who = static_cast<uint8_t>(id);
 
-            // Use the client's anchor to determine where remote players currently stand.
             playing[id] = (who == g_myId)
                 ? here
-                : (g_anchoredAt[id] > 0.0 && (now - g_anchoredAt[id]) < ANCHOR_FRESH);
+                : (g_anchoredAt[id] > 0.0 && (now - g_anchoredAt[id]) < ANCHOR_FRESH &&
+                   SameLevel(g_anchored[id].level));
+
             where[id] = (who == g_myId) ? mine.room : g_anchored[id].room;
 
             if (!playing[id])
@@ -640,6 +668,8 @@ namespace
         Mp::Writer writer(buffer, sizeof(buffer));
 
         writer.Header(Mp::PACKET_SPENT, g_sequence++);
+
+        writer.U32(g_myLevel);
         writer.U16(static_cast<uint16_t>(size));
 
         for (int at = 0; at < size; ++at)
@@ -686,6 +716,7 @@ namespace
         Mp::Writer writer(buffer, sizeof(buffer));
 
         writer.Header(Mp::PACKET_WORLD, g_sequence++);
+        writer.U32(g_myLevel);
         writer.U16(room);
         writer.U8(static_cast<uint8_t>(count));
 
@@ -794,6 +825,8 @@ namespace
             }
         }
 
+        // The level these rooms belong to: a room number means nothing without it.
+        writer.U32(g_myLevel);
         writer.U8(static_cast<uint8_t>(rooms));
 
         for (int at = 0; at < rooms; ++at)
@@ -1016,6 +1049,7 @@ namespace
 
             // Replace local room ownership with the host's latest ownership table.
             {
+                const uint32_t level = reader.U32();
                 const int rooms = reader.U8();
 
                 if (reader.Bad() || rooms > MAX_PEERS + 1)
@@ -1044,7 +1078,8 @@ namespace
                     g_owner[room] = NOBODY;
                 }
 
-                for (int at = 0; at < rooms; ++at)
+                // Rooms of a level I am not in are not rooms of mine: I run my own until I get there.
+                for (int at = 0; at < rooms && SameLevel(level); ++at)
                 {
                     if (which[at] < MAX_ROOMS)
                     {
@@ -1057,6 +1092,7 @@ namespace
 
         case Mp::PACKET_WORLD:
         {
+            const uint32_t level = reader.U32();
             const uint16_t room = reader.U16();
             const int count = reader.U8();
 
@@ -1127,8 +1163,7 @@ namespace
                 return;
             }
 
-            // Apply room state only for the current room and only when another player owns it.
-            if (room != g_myRoom || g_settings.world == 0 || IRun(room))
+            if (room != g_myRoom || !SameLevel(level) || g_settings.world == 0 || IRun(room))
             {
                 break;
             }
@@ -1147,10 +1182,10 @@ namespace
 
         case Mp::PACKET_SPENT:
         {
+            const uint32_t level = reader.U32();
             const int held = reader.U16();
 
-            // Spent objects only disappear, so packets can be applied in any order.
-            if (reader.Bad() || held <= 0 || held > reader.Left())
+            if (reader.Bad() || held <= 0 || held > reader.Left() || !SameLevel(level))
             {
                 ++g_ignored;
                 return;
@@ -1357,7 +1392,7 @@ namespace
             const bool playing = (now - g_pressedAt[id]) < INPUT_FRESH && (now - g_anchoredAt[id]) < INPUT_FRESH;
 
             // Do not simulate a remote body against the wrong room.
-            if (!playing || g_anchored[id].room != mine.room)
+            if (!playing || g_anchored[id].room != mine.room || !SameLevel(g_anchored[id].level))
             {
                 if (g_avatar[id] != nullptr)
                 {
@@ -1383,7 +1418,9 @@ namespace
             const Mp::Input& pressed = g_pressed[id];
             const int jump = (pressed.buttons & Mp::INPUT_JUMP) != 0 ? 1 : 0;
 
+            Mp::Room::ShutExit(true);
             Mp::Bodies::Step(g_avatar[id], pressed.dirX, pressed.dirY, jump, seconds);
+            Mp::Room::ShutExit(false);
 
             Mp::Body body = {};
             int state = 0;
@@ -1424,6 +1461,7 @@ namespace
             g_avatarFacing[id] = pressed.facing;
 
             body.id = id;
+            body.level = g_anchored[id].level;
             body.room = g_anchored[id].room;
             body.facing = g_avatarFacing[id];
             body.frameA = pressed.frameA;
@@ -1469,9 +1507,11 @@ namespace
             wanted[id] = true;
 
             // Step the body to run collision and touch logic, then restore its network position.
+            Mp::Room::ShutExit(true);
             Mp::Bodies::Place(g_avatar[id], others[at].position);
             Mp::Bodies::Step(g_avatar[id], 0, 0, 0, seconds);
             Mp::Bodies::Place(g_avatar[id], others[at].position);
+            Mp::Room::ShutExit(false);
         }
 
         for (int id = 0; id <= MAX_PEERS; ++id)
@@ -1629,6 +1669,18 @@ namespace
         const bool here = Mp::Avatars::ReadLocal(mine);
 
         mine.id = g_myId;
+        mine.level = MyLevel();
+
+        Mp::Menus::Block((!g_isHost && g_myId != 0) || (g_isHost && g_peerCount > 0));
+
+        if (mine.level != g_myLevel)
+        {
+            g_myLevel = mine.level;
+
+            Mp::Spent::Forget();
+            ResetOwners();
+            Mp::Room::LetGo();
+        }
 
         if (!here)
         {
@@ -1746,9 +1798,16 @@ namespace
 
         for (int id = 0; id <= MAX_PEERS; ++id)
         {
-            if (id != g_myId && BodyIsLive(static_cast<uint8_t>(id), now))
+            if (id == g_myId || !BodyIsLive(static_cast<uint8_t>(id), now))
             {
-                others[count++] = Smoothed(static_cast<uint8_t>(id), now);
+                continue;
+            }
+
+            const Mp::Body body = Smoothed(static_cast<uint8_t>(id), now);
+
+            if (SameLevel(body.level))
+            {
+                others[count++] = body;
             }
         }
 
@@ -2005,6 +2064,13 @@ namespace
             g_myRoom, g_drawn.queued, g_drawn.elsewhere, g_drawn.refused,
             g_drawn.noModel ? ", no model" : (g_drawn.noView ? ", no camera" : ""));
 
+        Console::Printf("mp: level %08X\n", g_myLevel);
+
+        if (Mp::Menus::Blocked())
+        {
+            Console::Print("mp: saving and loading are off while the session lasts\n");
+        }
+
         if (g_myRoom < MAX_ROOMS && g_owner[g_myRoom] != NOBODY && !IRun(g_myRoom))
         {
             Console::Printf("mp: this room is run by player %u; I follow him\n", g_owner[g_myRoom]);
@@ -2111,6 +2177,10 @@ namespace
             else if (age >= g_settings.stale)
             {
                 why = " STALE";
+            }
+            else if (!SameLevel(body.level))
+            {
+                why = " ANOTHER LEVEL";
             }
             else if (body.room != g_myRoom)
             {
@@ -2520,6 +2590,7 @@ AMOD_EXPORT int __cdecl AmodInit(const AmodApi* api)
     }
 
     Mp::Bodies::Open();
+    Mp::Menus::Open();
     Mp::Spent::Watch();
 
     ResetOwners();
@@ -2551,6 +2622,7 @@ AMOD_EXPORT void __cdecl AmodShutdown(void)
     Mp::Room::LetGo();
     DropAvatars();
     Mp::Bodies::Close();
+    Mp::Menus::Close();
     Mp::Focus::Release();
     Mp::Background::Release();
     Mp::Avatars::Forget();

@@ -82,6 +82,7 @@
     <ClCompile Include="src\Mod.cpp" />
     <ClCompile Include="src\Net.cpp" />
     <ClCompile Include="src\Room.cpp" />
+    <ClCompile Include="src\Menus.cpp" />
     <ClCompile Include="src\Spent.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -92,6 +93,7 @@
     <ClInclude Include="src\Net.h" />
     <ClInclude Include="src\Protocol.h" />
     <ClInclude Include="src\Room.h" />
+    <ClInclude Include="src\Menus.h" />
     <ClInclude Include="src\Spent.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

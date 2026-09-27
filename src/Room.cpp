@@ -75,6 +75,10 @@ namespace Mp
             }
 
             const int DOOR_KIND = 2;
+            const int EXIT_KIND = 6;
+
+            int g_exit = -1;
+            bool g_exitAsked = false;
 
             bool IsDoor(AmodCtrlId id)
             {
@@ -567,6 +571,39 @@ namespace Mp
         void LetGo()
         {
             g_knownCount = 0;
+            g_exit = -1;
+            g_exitAsked = false;
+        }
+
+        void ShutExit(bool shut)
+        {
+            if (!Ctrls::IsAvailable())
+            {
+                return;
+            }
+
+            if (!g_exitAsked)
+            {
+                const int count = Ctrls::PlacementCount();
+
+                g_exitAsked = true;
+                g_exit = -1;
+
+                for (int at = 0; at < count && g_exit < 0; ++at)
+                {
+                    AmodCtrlPlacement placement = {};
+
+                    if (Ctrls::GetPlacement(at, placement) && placement.kind == EXIT_KIND)
+                    {
+                        g_exit = Ctrls::IndexOf(placement.id);
+                    }
+                }
+            }
+
+            if (g_exit >= 0)
+            {
+                Ctrls::SetTouchable(g_exit, !shut);
+            }
         }
 
         int Held()

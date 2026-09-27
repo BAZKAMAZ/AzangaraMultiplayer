@@ -54,6 +54,9 @@ namespace Mp
         int                                                         ReadMovers(Mover* out, int max);
         void                                                        ApplyMovers(const Mover* movers, int count);
 
+        // A remote body must not touch the exit when its owner leaves the level.
+        void                                                        ShutExit(bool shut);
+
         void                                                        Hold(bool freeze);
         void                                                        Trace(bool on);
         bool                                                        Holding();
