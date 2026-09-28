@@ -13,7 +13,9 @@
 #include "Focus.h"
 #include "Net.h"
 #include "Room.h"
+#include "Lobby.h"
 #include "Menus.h"
+#include "Names.h"
 #include "Spent.h"
 #include "Protocol.h"
 
@@ -23,27 +25,27 @@ namespace
 {
     struct Settings
     {
-        char peer[128];     // mp_peer: address used for hello packets
-        int port;           // mp_port: first local port
-        int slots;          // mp_slots: number of ports in the range
-        float rate;         // mp_rate: hellos per second
-        float tick;         // mp_tick: body updates per second
-        int host;           // mp_host: 1 host, 0 client, -1 first port decides
-        float stale;        // mp_stale: seconds a body stays drawable
-        float delay;        // mp_delay: interpolation delay
-        float anchor;       // mp_anchor: client position update rate
-        float snap;         // mp_snap: maximum position drift before correction
-        float pull;         // mp_pull: host correction strength
-        float hard;         // mp_hard: distance where correction becomes an instant move
-        int lag;            // mp_lag: intentional packet delay in milliseconds
-        int world;          // mp_world: room objects are controlled by the host
-        float worldRate;    // mp_wrate: room state update rate
-        int hold;           // mp_hold: client removes room objects from its game
-        int touch;          // mp_touch: stepped bodies interact with room objects
-        int background;     // mp_background: keep running when unfocused
-        int focus;          // mp_focus: capture keyboard only while focused
-        int loss;           // mp_loss: percentage of outgoing packets dropped
-        bool chatter;       // mp_log: log one line per packet
+        char peer[128]; // hello peer address
+        int port; // first local port
+        int slots; // port range size
+        float rate; // hellos per second
+        float tick; // body updates per second
+        int host; // host mode
+        float stale; // body draw timeout
+        float delay; // interpolation delay
+        float anchor; // client anchor rate
+        float snap; // correction threshold
+        float pull; // host correction strength
+        float hard; // hard correction distance
+        int lag; // packet delay (ms)
+        int world; // host controls room objects
+        float worldRate; // room state update rate
+        int hold; // client removes room objects
+        int touch; // enable body/room interaction
+        int background; // run when unfocused
+        int focus; // capture keyboard while focused
+        int loss; // packet loss percent
+        bool chatter; // packet logging
     };
 
     Settings g_settings =
@@ -77,17 +79,17 @@ namespace
     {
         Mp::Address address;
         char name[Mp::MAX_NAME + 1];
-        double heardAt;     // local clock time of the last packet
+        double heardAt; // last packet time
         int packets;
-        bool greeted;       // peer has answered at least once
-        uint8_t id;         // host-assigned player id, 0 until assigned
+        bool greeted; // peer answered
+        uint8_t id; // assigned player id
     };
 
     Mp::Socket g_socket;
-    Mp::Address g_targets[MAX_PEERS];    // hello destinations
+    Mp::Address g_targets[MAX_PEERS]; // hello targets
     int g_targetCount = 0;
 
-    Peer g_peers[MAX_PEERS];             // known peers
+    Peer g_peers[MAX_PEERS]; // known peers
     int g_peerCount = 0;
 
     char g_name[Mp::MAX_NAME + 1] = "player";
@@ -95,28 +97,32 @@ namespace
     bool g_running = false;
     uint16_t g_sequence = 0;
 
-    // The host is player 0 and assigns the remaining ids.
+    // Host is player 0.
     bool g_isHost = true;
+
+    // Set when a room is created.
+    bool g_opened = false;
+    char g_openedLevel[Mp::MAX_LEVEL + 1] = {};
 
     uint8_t g_myId = 0;
     Mp::Address g_host = {};
 
-    // Bodies are indexed by player id; host uses MOVE and clients use STATE.
+    // Bodies are indexed by player id.
     Mp::Body g_bodies[MAX_PEERS + 1] = {};
     double g_bodyAt[MAX_PEERS + 1] = {};
 
     Mp::Body g_before[MAX_PEERS + 1] = {};
     double g_beforeAt[MAX_PEERS + 1] = {};
 
-    // Marks bodies simulated locally instead of from network snapshots.
+    // Marks locally simulated bodies.
     bool g_ours[MAX_PEERS + 1] = {};
 
-    // Host-side remote bodies and their latest inputs.
+    // Host-side remote bodies and inputs.
     void* g_avatar[MAX_PEERS + 1] = {};
     Mp::Input g_pressed[MAX_PEERS + 1] = {};
     double g_pressedAt[MAX_PEERS + 1] = {};
 
-    // Track how long host and client positions have disagreed.
+    // Tracks host/client position divergence.
     double g_apartAt[MAX_PEERS + 1] = {};
     const double APART_PATIENCE = 1.5;
     float g_avatarFacing[MAX_PEERS + 1] = {};
@@ -124,7 +130,7 @@ namespace
     Mp::Body g_anchored[MAX_PEERS + 1] = {};
     double g_anchoredAt[MAX_PEERS + 1] = {};
 
-    // A room is owned by the player who entered it first and is still inside.
+    // Room owner is the first active player inside.
     const int MAX_ROOMS = 64;
     const uint8_t NOBODY = 0xFF;
 
@@ -179,7 +185,7 @@ namespace
         return room >= MAX_ROOMS || g_owner[room] == NOBODY || g_owner[room] == g_myId;
     }
 
-    // Only the host's settled ownership decision lets this copy publish room state.
+    // Only the settled owner publishes room state.
     bool IOwn(uint16_t room)
     {
         return room < MAX_ROOMS && g_owner[room] == g_myId && (g_isHost || g_myId != 0);
@@ -189,8 +195,10 @@ namespace
     float g_sinceWorld = 0.0f;
     float g_sinceSpent = 0.0f;
     float g_sinceLook = 0.0f;
+    float g_sinceRooms = 0.0f;
+    float g_sinceNames = 0.0f;
 
-    // Host's latest position for the local player.
+    // Host's latest local-player position.
     Mp::Body g_saidOfMe = {};
     double g_saidOfMeAt = 0.0;
     uint16_t g_lastState = 0;
@@ -199,17 +207,17 @@ namespace
     uint64_t g_pulled = 0;
     uint64_t g_moved = 0;
 
-    // Track position divergence and the last non-reproducible action.
+    // Tracks position divergence.
     double g_apartSince = 0.0;
     double g_notWalkingAt = 0.0;
 
-    // Position divergence must persist this long before correction.
+    // Required divergence time before correction.
     const double PATIENCE = 0.5;
 
-    // Grace period after climbing before position correction.
+    // Delay correction after climbing.
     const double GRACE = 1.0;
 
-    // Delayed packets used to simulate network latency.
+    // Simulated network delay queue.
     struct Held
     {
         Mp::Address from;
@@ -223,10 +231,10 @@ namespace
     Held g_held[MAX_HELD] = {};
     int g_heldCount = 0;
 
-    // Clients silent this long are considered inactive.
+    // Timeout for inactive clients.
     const double INPUT_FRESH = 0.5;
 
-    // Input captured from this player's controls.
+    // Local player input.
     Mp::Input g_mine = {};
     uint32_t g_myTick = 0;
 
@@ -242,17 +250,17 @@ namespace
 
     uint64_t g_sent = 0;
     uint64_t g_received = 0;
-    uint64_t g_ignored = 0;      // received but invalid or irrelevant
-    uint64_t g_dropped = 0;      // intentionally dropped outgoing packets
-    uint64_t g_renderFrames = 0; // frames that pumped the network
-    uint64_t g_worldFrames = 0;  // frames that advanced the level
-    int g_lastRtt = -1;          // RTT in milliseconds, -1 until WELCOME
+    uint64_t g_ignored = 0; // invalid/irrelevant packets
+    uint64_t g_dropped = 0; // dropped packets
+    uint64_t g_renderFrames = 0; // network frames
+    uint64_t g_worldFrames = 0; // world frames
+    int g_lastRtt = -1; // RTT in ms
 
     float g_sinceHello = 0.0f;
 
     AmodToken g_frameToken = AMOD_INVALID_TOKEN;
 
-    // Local high-resolution clock.
+    // High-resolution clock.
 
     LARGE_INTEGER g_frequency = {};
     LARGE_INTEGER g_start = {};
@@ -423,8 +431,8 @@ namespace
         Mp::Writer writer(buffer, sizeof(buffer));
 
         writer.Header(Mp::PACKET_HELLO, g_sequence++);
-        writer.Text(g_name, Mp::MAX_NAME);
-        writer.U32(NowMs());        // echoed by WELCOME for RTT measurement
+        writer.Text(Mp::Names::Mine(), Mp::MAX_NAME);
+        writer.U32(NowMs()); // RTT stamp
 
         if (writer.Overflowed())
         {
@@ -440,8 +448,8 @@ namespace
         Mp::Writer writer(buffer, sizeof(buffer));
 
         writer.Header(Mp::PACKET_WELCOME, g_sequence++);
-        writer.Text(g_name, Mp::MAX_NAME);
-        writer.U32(stamp);          // client's timestamp, used to measure its RTT
+        writer.Text(Mp::Names::Mine(), Mp::MAX_NAME);
+        writer.U32(stamp); // client RTT stamp
         writer.U8(id);
 
         if (writer.Overflowed())
@@ -452,13 +460,53 @@ namespace
         SendTo(to, buffer, writer.Size());
     }
 
+    // Host sends the player-name list.
+    void SendNames()
+    {
+        uint8_t buffer[Mp::MAX_PACKET];
+        Mp::Writer writer(buffer, sizeof(buffer));
+        int count = 1;
+
+        for (int at = 0; at < g_peerCount; ++at)
+        {
+            count += g_peers[at].id != 0 ? 1 : 0;
+        }
+
+        writer.Header(Mp::PACKET_NAMES, g_sequence++);
+        writer.U8(static_cast<uint8_t>(count));
+        writer.U8(0);
+        writer.Text(Mp::Names::Mine(), Mp::MAX_NAME);
+
+        for (int at = 0; at < g_peerCount; ++at)
+        {
+            if (g_peers[at].id != 0)
+            {
+                writer.U8(g_peers[at].id);
+                writer.Text(g_peers[at].name, Mp::MAX_NAME);
+            }
+        }
+
+        if (writer.Overflowed())
+        {
+            return;
+        }
+
+        for (int at = 0; at < g_peerCount; ++at)
+        {
+            if (g_peers[at].id != 0)
+            {
+                SendTo(g_peers[at].address, buffer, writer.Size());
+            }
+        }
+    }
+
     void SendBye()
     {
         uint8_t buffer[Mp::MAX_PACKET];
         Mp::Writer writer(buffer, sizeof(buffer));
 
         writer.Header(Mp::PACKET_BYE, g_sequence++);
-        writer.U8(0);               // reserved reason code
+        writer.U8(0); // reserved
 
         for (int at = 0; at < g_peerCount; ++at)
         {
@@ -491,7 +539,7 @@ namespace
         const double span = g_bodyAt[id] - g_beforeAt[id];
         const double when = now - g_settings.delay;
 
-        // Locally simulated bodies do not need snapshot interpolation.
+        // Skip interpolation for local bodies.
         if (g_ours[id])
         {
             return latest;
@@ -517,7 +565,7 @@ namespace
                 (latest.position[axis] - was.position[axis]) * part;
         }
 
-        // Interpolate facing using the shortest rotation path.
+        // Interpolate facing via the shortest path.
         float turn = latest.facing - was.facing;
         while (turn > 3.14159265f)
         {
@@ -550,7 +598,7 @@ namespace
             playing[id] = (who == g_myId)
                 ? here
                 : (g_anchoredAt[id] > 0.0 && (now - g_anchoredAt[id]) < ANCHOR_FRESH &&
-                   SameLevel(g_anchored[id].level));
+                    SameLevel(g_anchored[id].level));
 
             where[id] = (who == g_myId) ? mine.room : g_anchored[id].room;
 
@@ -653,7 +701,135 @@ namespace
         }
     }
 
-    // Host and clients exchange the persistent spent state of bonuses, monsters and doors.
+    // Only open rooms answer.
+
+    struct Known
+    {
+        Mp::Address where;
+        double asked; // request time
+        double heard; // response time
+        int ping; // ping in ms
+        int players;
+        bool hosting;
+        char palace[Mp::MAX_PALACE + 1];
+        char level[Mp::MAX_LEVEL + 1];
+    };
+
+    Known g_known[MAX_PEERS + 1] = {};
+    int g_knownCount = 0;
+    float g_sinceAsk = 0.0f;
+
+    Known* KnownAt(const Mp::Address& where)
+    {
+        for (int at = 0; at < g_knownCount; ++at)
+        {
+            if (g_known[at].where == where)
+            {
+                return &g_known[at];
+            }
+        }
+
+        if (g_knownCount >= MAX_PEERS + 1)
+        {
+            return nullptr;
+        }
+
+        Known& made = g_known[g_knownCount++];
+
+        made = Known{};
+        made.where = where;
+        made.ping = -1;
+        made.players = -1;
+
+        return &made;
+    }
+
+    // Use the level file name as the palace identifier.
+    const char* MyPalace()
+    {
+        static char palace[Mp::MAX_PALACE + 1] = {};
+
+        AmodWorldLevel level = {};
+
+        palace[0] = 0;
+
+        if (!World::IsLevelLoaded() || !World::GetLevel(level) || level.script == nullptr)
+        {
+            return palace;
+        }
+
+        const char* name = level.script;
+
+        for (const char* at = level.script; *at != 0; ++at)
+        {
+            name = (*at == '/' || *at == '\\') ? at + 1 : name;
+        }
+
+        int kept = 0;
+
+        while (name[kept] != 0 && name[kept] != '.' && kept < Mp::MAX_PALACE)
+        {
+            palace[kept] = name[kept];
+            ++kept;
+        }
+
+        palace[kept] = 0;
+        return palace;
+    }
+
+    void AskWho(const Mp::Address& where)
+    {
+        Known* const known = KnownAt(where);
+
+        if (known == nullptr)
+        {
+            return;
+        }
+
+        known->asked = Now();
+
+        uint8_t buffer[Mp::MAX_PACKET];
+        Mp::Writer writer(buffer, sizeof(buffer));
+
+        writer.Header(Mp::PACKET_WHO, g_sequence++);
+
+        if (!writer.Overflowed())
+        {
+            SendTo(where, buffer, writer.Size());
+        }
+    }
+
+    // Room is open, hosted, and a level is loaded.
+    bool Hosting()
+    {
+        return g_opened && g_isHost && World::IsLevelLoaded();
+    }
+
+    void SayRoom(const Mp::Address& to)
+    {
+        uint8_t buffer[Mp::MAX_PACKET];
+        Mp::Writer writer(buffer, sizeof(buffer));
+
+        int playing = g_isHost ? 1 : 0;
+
+        for (int at = 0; at < g_peerCount; ++at)
+        {
+            playing += g_peers[at].id != 0 ? 1 : 0;
+        }
+
+        writer.Header(Mp::PACKET_ROOM, g_sequence++);
+        writer.U8(g_isHost ? 1 : 0);
+        writer.U8(static_cast<uint8_t>(playing));
+        writer.Text(MyPalace(), Mp::MAX_PALACE);
+        writer.Text(g_openedLevel, Mp::MAX_LEVEL);
+
+        if (!writer.Overflowed())
+        {
+            SendTo(to, buffer, writer.Size());
+        }
+    }
+
+    // Exchange persistent spent state.
     void SendSpent()
     {
         uint8_t what[Mp::MAX_PACKET];
@@ -698,7 +874,7 @@ namespace
         }
     }
 
-    // Send the current room's machines and monsters from whoever owns that room.
+    // Send the current room state.
     void SendWorld(uint16_t room)
     {
         Mp::Room::Thing things[Mp::Room::MAX_THINGS];
@@ -731,7 +907,7 @@ namespace
             writer.Float(things[at].timer);
         }
 
-        // Append room-local monster movers.
+        // Append room movers.
         writer.U8(static_cast<uint8_t>(walking));
 
         for (int at = 0; at < walking; ++at)
@@ -769,7 +945,7 @@ namespace
         }
     }
 
-    // Host to clients: broadcast all live player bodies.
+    // Broadcast live player bodies.
     void SendState()
     {
         uint8_t buffer[Mp::MAX_PACKET];
@@ -781,7 +957,7 @@ namespace
         writer.Header(Mp::PACKET_STATE, g_sequence++);
         writer.U32(NowMs());
 
-        // Count live bodies before writing them.
+        // Count live bodies.
         for (int id = 0; id <= MAX_PEERS; ++id)
         {
             if (BodyIsLive(static_cast<uint8_t>(id), now))
@@ -800,7 +976,7 @@ namespace
             }
         }
 
-        // Send ownership for every room currently occupied.
+        // Send occupied-room ownership.
         uint16_t said[MAX_PEERS + 1] = {};
         int rooms = 0;
 
@@ -825,7 +1001,7 @@ namespace
             }
         }
 
-        // The level these rooms belong to: a room number means nothing without it.
+        // Include the level for room ownership.
         writer.U32(g_myLevel);
         writer.U8(static_cast<uint8_t>(rooms));
 
@@ -886,7 +1062,6 @@ namespace
 
             if (g_settings.chatter)
             {
-                //Console::Printf("mp: HELLO #%u from %s (%s)\n", sequence, Mp::ToText(from), name);
             }
 
             uint8_t id = 0;
@@ -901,6 +1076,7 @@ namespace
                 }
 
                 id = peer->id;
+                Mp::Names::Set(id, peer->name);
             }
 
             SendWelcome(from, stamp, id);
@@ -923,7 +1099,7 @@ namespace
             Peer* const peer = RememberPeer(from, name);
             g_lastRtt = static_cast<int>(NowMs() - stamp);
 
-            // Only the host assigns ids; this is how a client learns its own id.
+            // Only the host assigns ids.
             if (id != 0 && !g_isHost)
             {
                 if (g_myId != id || !(g_host == from))
@@ -934,6 +1110,7 @@ namespace
 
                 g_myId = id;
                 g_host = from;
+                Mp::Names::Set(0, name);
             }
 
             if (peer != nullptr && !peer->greeted)
@@ -945,7 +1122,6 @@ namespace
 
             if (g_settings.chatter)
             {
-                //Console::Printf("mp: WELCOME #%u from %s (%s), id %u, %d ms\n", sequence, Mp::ToText(from), name, static_cast<unsigned>(id), g_lastRtt);
             }
             break;
         }
@@ -968,7 +1144,7 @@ namespace
                 return;
             }
 
-            // Ignore older input packets that arrive after newer ones.
+            // Ignore older input packets.
             if (g_pressed[peer->id].tick == 0 || input.tick >= g_pressed[peer->id].tick)
             {
                 g_pressed[peer->id] = input;
@@ -1005,7 +1181,7 @@ namespace
             const uint32_t sent = reader.U32();
             const int count = reader.U8();
 
-            // The host owns STATE generation, so it ignores incoming STATE packets.
+            // Host ignores incoming STATE packets.
             if (reader.Bad() || g_isHost)
             {
                 ++g_ignored;
@@ -1014,7 +1190,7 @@ namespace
 
             (void)sent;
 
-            // Reject snapshots older than the latest accepted sequence.
+            // Reject older snapshots.
             if (g_hadState && static_cast<int16_t>(sequence - g_lastState) <= 0)
             {
                 ++g_ignored;
@@ -1037,7 +1213,7 @@ namespace
 
                 if (body.id == g_myId)
                 {
-                    // Keep the host copy of the local player for reconciliation only.
+                    // Keep the host copy for reconciliation.
                     g_saidOfMe = body;
                     g_saidOfMeAt = Now();
                 }
@@ -1047,7 +1223,7 @@ namespace
                 }
             }
 
-            // Replace local room ownership with the host's latest ownership table.
+            // Apply the host's room ownership table.
             {
                 const uint32_t level = reader.U32();
                 const int rooms = reader.U8();
@@ -1078,7 +1254,7 @@ namespace
                     g_owner[room] = NOBODY;
                 }
 
-                // Rooms of a level I am not in are not rooms of mine: I run my own until I get there.
+                // Run rooms locally until entering their level.
                 for (int at = 0; at < rooms && SameLevel(level); ++at)
                 {
                     if (which[at] < MAX_ROOMS)
@@ -1102,7 +1278,7 @@ namespace
                 return;
             }
 
-            // The host validates the sender's room ownership before relaying the packet.
+            // Host validates room ownership before relaying.
             if (g_isHost)
             {
                 const Peer* const said = FindPeer(from);
@@ -1180,6 +1356,77 @@ namespace
             break;
         }
 
+        case Mp::PACKET_WHO:
+        {
+            // Only hosted rooms answer WHO.
+            if (Hosting())
+            {
+                SayRoom(from);
+            }
+            break;
+        }
+
+        case Mp::PACKET_NAMES:
+        {
+            const int count = reader.U8();
+
+            if (reader.Bad() || g_isHost || !(from == g_host))
+            {
+                ++g_ignored;
+                return;
+            }
+
+            for (int at = 0; at < count; ++at)
+            {
+                const uint8_t id = reader.U8();
+                char name[Mp::MAX_NAME + 1] = {};
+
+                reader.Text(name, sizeof(name));
+
+                if (reader.Bad())
+                {
+                    ++g_ignored;
+                    return;
+                }
+
+                Mp::Names::Set(id, name);
+            }
+            break;
+        }
+
+        case Mp::PACKET_ROOM:
+        {
+            const int hosting = reader.U8();
+            const int players = reader.U8();
+            char palace[Mp::MAX_PALACE + 1] = {};
+            char level[Mp::MAX_LEVEL + 1] = {};
+
+            reader.Text(palace, sizeof(palace));
+            reader.Text(level, sizeof(level));
+
+            if (reader.Bad())
+            {
+                ++g_ignored;
+                return;
+            }
+
+            Known* const known = KnownAt(from);
+
+            if (known == nullptr)
+            {
+                break;
+            }
+
+            known->heard = Now();
+            known->ping = known->asked > 0.0
+                ? static_cast<int>((known->heard - known->asked) * 1000.0 + 0.5) : -1;
+            known->hosting = hosting != 0;
+            known->players = players;
+            strcpy_s(known->palace, sizeof(known->palace), palace);
+            strcpy_s(known->level, sizeof(known->level), level);
+            break;
+        }
+
         case Mp::PACKET_SPENT:
         {
             const uint32_t level = reader.U32();
@@ -1225,7 +1472,7 @@ namespace
 
                 if (!reader.Bad() && index >= 0)
                 {
-                    // Host applies the requested tag change; the next WORLD packet propagates it.
+                    // Host applies the requested tag change.
                     Ctrls::SetTagOn(index, true);
                 }
             }
@@ -1241,7 +1488,7 @@ namespace
 
         default:
         {
-            // INPUT, STATE and EVENT are handled elsewhere and only counted here.
+            // Other packet types are handled elsewhere.
             if (g_settings.chatter)
             {
                 Console::Printf("mp: %s #%u from %s, %d bytes\n", Mp::PacketName(type), sequence, Mp::ToText(from), size);
@@ -1251,7 +1498,7 @@ namespace
         }
     }
 
-    // Release delayed packets in due-time order.
+    // Release delayed packets.
     void ReleaseHeld()
     {
         const double now = Now();
@@ -1281,7 +1528,7 @@ namespace
     {
         if (g_heldCount >= MAX_HELD)
         {
-            // Drop packets when the intentional delay queue is full.
+            // Drop packets when the delay queue is full.
             ++g_dropped;
             return;
         }
@@ -1391,7 +1638,7 @@ namespace
 
             const bool playing = (now - g_pressedAt[id]) < INPUT_FRESH && (now - g_anchoredAt[id]) < INPUT_FRESH;
 
-            // Do not simulate a remote body against the wrong room.
+            // Skip remote bodies in another room.
             if (!playing || g_anchored[id].room != mine.room || !SameLevel(g_anchored[id].level))
             {
                 if (g_avatar[id] != nullptr)
@@ -1405,7 +1652,7 @@ namespace
 
             if (g_avatar[id] == nullptr)
             {
-                // Spawn the remote body at its latest anchor position.
+                // Spawn at the latest anchor position.
                 g_avatar[id] = Mp::Bodies::Create(g_anchored[id].position);
                 g_avatarFacing[id] = g_anchored[id].facing;
 
@@ -1428,7 +1675,7 @@ namespace
 
             Mp::Bodies::Read(g_avatar[id], body.position, state, subState);
 
-            // Anchors correct persistent drift, not ordinary jumps or climbs.
+            // Anchors correct persistent drift.
             const float* const said = g_anchored[id].position;
             float apart = 0.0f;
 
@@ -1457,7 +1704,7 @@ namespace
                 }
             }
 
-            // Use the facing reported by the remote player.
+            // Use the remote facing.
             g_avatarFacing[id] = pressed.facing;
 
             body.id = id;
@@ -1474,7 +1721,7 @@ namespace
         }
     }
 
-    // Place remote bodies through the game's own collision and touch passes.
+    // Run remote bodies through collision/touch logic.
     void PlaceAvatars(const Mp::Body* others, int count, float seconds, const Mp::Body& mine)
     {
         if (others == nullptr || !Mp::Bodies::IsOpen())
@@ -1506,7 +1753,7 @@ namespace
 
             wanted[id] = true;
 
-            // Step the body to run collision and touch logic, then restore its network position.
+            // Step for collision/touch, then restore position.
             Mp::Room::ShutExit(true);
             Mp::Bodies::Place(g_avatar[id], others[at].position);
             Mp::Bodies::Step(g_avatar[id], 0, 0, 0, seconds);
@@ -1523,7 +1770,157 @@ namespace
         }
     }
 
-    // Remove all state associated with a disconnected peer immediately.
+
+    void BuildLoopbackTargets(const Mp::Address& peer);
+
+    // Lobby start gives the palace fresh lives.
+    const int FRESH_LIVES = 3;
+    bool g_freshLives = false;
+
+    // Start the level from the lobby.
+    void StartPalace(const char* level)
+    {
+        if (level == nullptr || level[0] == 0)
+        {
+            Console::Print("mp: the palace's first level is not known; open the castles screen once\n");
+            return;
+        }
+
+        if (!World::StartLevel(level))
+        {
+            Console::Printf("mp: the palace would not start: %s\n", LastError());
+            return;
+        }
+
+        g_freshLives = true;
+        Console::Printf("mp: starting %s\n", level);
+    }
+
+    // Open the room and start its palace.
+    void OpenRoom(const char* palace)
+    {
+        g_settings.host = 1;
+        g_isHost = true;
+        g_opened = true;
+        strcpy_s(g_openedLevel, sizeof(g_openedLevel), palace != nullptr ? palace : "");
+        g_myId = 0;
+        g_host = Mp::Address{};
+        Config::Set("mp_host", 1);
+
+        for (int at = 0; at < g_peerCount; ++at)
+        {
+            g_peers[at].id = 0;
+        }
+
+        ResetOwners();
+
+        Console::Printf("mp: the room is open on port %u, listed once in the level\n", g_socket.Port());
+        StartPalace(g_openedLevel);
+    }
+
+    void CloseRoom()
+    {
+        if (!g_opened)
+        {
+            return;
+        }
+
+        g_opened = false;
+        Console::Print("mp: the room is closed and gone from the list\n");
+    }
+
+    // Join the room and start its palace.
+    void JoinRoom(const char* address, const char* level)
+    {
+        Mp::Address where = {};
+
+        if (address == nullptr ||
+            !Mp::Resolve(address, static_cast<uint16_t>(g_settings.port), where))
+        {
+            Console::Printf("mp: '%s' is not an address\n", address != nullptr ? address : "");
+            return;
+        }
+
+        strcpy_s(g_settings.peer, sizeof(g_settings.peer), address);
+        Config::Set("mp_peer", g_settings.peer);
+
+        g_settings.host = 0;
+        g_isHost = false;
+        g_opened = false;
+        g_myId = 0;
+        g_targetCount = 0;
+
+        if (Mp::IsLoopback(where))
+        {
+            BuildLoopbackTargets(where);
+        }
+        else
+        {
+            g_targets[g_targetCount++] = where;
+        }
+
+        Config::Set("mp_host", 0);
+        ResetOwners();
+
+        Console::Printf("mp: knocking at %s\n", Mp::ToText(where));
+        StartPalace(level);
+    }
+
+    // Lobby rooms come from known and target peers.
+    void ShowRooms()
+    {
+        Mp::Lobby::Room rooms[Mp::Lobby::MAX_ROOMS] = {};
+        int count = 0;
+        const double now = Now();
+
+        for (int at = 0; at < g_knownCount && count < Mp::Lobby::MAX_ROOMS; ++at)
+        {
+            const Known& known = g_known[at];
+
+            // Hide rooms that stopped answering.
+            if (known.heard <= 0.0 || (now - known.heard) > 6.0)
+            {
+                continue;
+            }
+
+            Mp::Lobby::Room& room = rooms[count++];
+
+            room.ping = known.ping;
+            room.players = known.players;
+            strcpy_s(room.address, sizeof(room.address), Mp::ToText(known.where));
+            strcpy_s(room.palace, sizeof(room.palace),
+                known.palace[0] != 0 ? known.palace : (known.hosting ? "waiting" : "-"));
+            strcpy_s(room.level, sizeof(room.level), known.level);
+        }
+
+        Mp::Lobby::Rooms(rooms, count);
+    }
+
+    // Query all targets and the local socket.
+    void AskAround()
+    {
+        Mp::Address mine = {};
+
+        mine.ip = 0x0100007F;
+        mine.port = g_socket.Port();
+
+        AskWho(mine);
+
+        for (int at = 0; at < g_targetCount; ++at)
+        {
+            AskWho(g_targets[at]);
+        }
+
+        for (int at = 0; at < g_peerCount; ++at)
+        {
+            if (g_peers[at].id != 0)
+            {
+                AskWho(g_peers[at].address);
+            }
+        }
+    }
+
+    // Clear disconnected peer state.
     void ForgetPeer(const Mp::Address& address)
     {
         const bool wasHost = g_host.IsSet() && g_host == address;
@@ -1548,7 +1945,7 @@ namespace
             break;
         }
 
-        // Player 0 is the host and is not stored as a peer.
+        // Player 0 is the host.
         if (wasHost)
         {
             Mp::Room::LetGo();
@@ -1584,7 +1981,7 @@ namespace
         }
     }
 
-    // Locally predict movement and gradually reconcile it toward the host.
+    // Predict local movement and reconcile to the host.
     void Reconcile(const Mp::Body& mine, float seconds)
     {
         if (g_isHost || g_myId == 0 || g_saidOfMeAt <= 0.0 || g_settings.pull <= 0.0f)
@@ -1594,13 +1991,13 @@ namespace
 
         const double now = Now();
 
-        // Skip stale corrections and cross-room mismatches.
+        // Skip stale or cross-room corrections.
         if ((now - g_saidOfMeAt) > 1.0 || g_saidOfMe.room != mine.room)
         {
             return;
         }
 
-        // Do not correct while climbing; wait until the player is on foot.
+        // Skip correction while climbing.
         if (mine.state != AMOD_PLAYER_STATE_ONFOOT)
         {
             g_notWalkingAt = now;
@@ -1624,14 +2021,14 @@ namespace
 
         apart = sqrtf(apart);
 
-        // Small differences are ignored.
+        // Ignore small differences.
         if (apart < 0.05f)
         {
             g_apartSince = 0.0;
             return;
         }
 
-        // Require the difference to persist before changing the position.
+        // Require persistent divergence before correction.
         if (g_apartSince <= 0.0)
         {
             g_apartSince = now;
@@ -1651,7 +2048,7 @@ namespace
             return;
         }
 
-        // Use SetPositionOnly so the correction does not erase movement delta.
+        // Use SetPositionOnly to preserve movement delta.
         const float part = g_settings.pull * seconds > 1.0f ? 1.0f : g_settings.pull * seconds;
 
         Player::SetPositionOnly(mine.position[0] + gap[0] * part, mine.position[1] + gap[1] * part, mine.position[2] + gap[2] * part);
@@ -1687,7 +2084,7 @@ namespace
             DropAvatars();
             Mp::Room::LetGo();
 
-            // A new level starts with fresh spent and room state.
+            // Reset spent and room state on a new level.
             Mp::Spent::Forget();
             ResetOwners();
             g_jumpKeyCount = -1;
@@ -1706,6 +2103,13 @@ namespace
         if (here)
         {
             Reconcile(mine, seconds);
+        }
+
+        // Level_Start does not reset lives.
+        if (here && g_freshLives)
+        {
+            g_freshLives = false;
+            Player::SetLives(FRESH_LIVES);
         }
 
         g_mine.tick = ++g_myTick;
@@ -1750,13 +2154,13 @@ namespace
             }
         }
 
-        // Periodically exchange persistent spent state.
+        // Periodically sync spent state.
         if (here && g_settings.world != 0)
         {
             g_sinceSpent += seconds;
             g_sinceLook += seconds;
 
-            // Check for immediate room changes several times per second.
+            // Check room changes frequently.
             if (g_sinceLook >= 0.25f)
             {
                 g_sinceLook = 0.0f;
@@ -1775,7 +2179,7 @@ namespace
             }
         }
 
-        // Clients send position anchors at the configured rate.
+        // Clients send position anchors periodically.
         if (!g_isHost && here && g_settings.anchor > 0.0f)
         {
             g_sinceAnchor += seconds;
@@ -1811,7 +2215,7 @@ namespace
             }
         }
 
-        // Clear cached room objects when entering a different room.
+        // Clear cached room objects on room change.
         if (mine.room != g_myRoom)
         {
             Mp::Room::LetGo();
@@ -1819,7 +2223,7 @@ namespace
 
         g_myRoom = mine.room;
 
-        // Clients simulate remote bodies locally for collision and touch behavior.
+        // Clients simulate remote bodies locally.
         if (!g_isHost)
         {
             PlaceAvatars(others, count, seconds, mine);
@@ -1833,6 +2237,38 @@ namespace
     {
         ++g_renderFrames;
         Pump(frame != nullptr ? frame->delta : 0.0f);
+
+        // Redraw the rooms list from session data.
+        g_sinceRooms += frame != nullptr ? frame->delta : 0.0f;
+
+        if (g_sinceRooms >= 0.5f)
+        {
+            g_sinceRooms = 0.0f;
+            ShowRooms();
+        }
+
+        // Refresh room discovery once per second.
+        g_sinceAsk += frame != nullptr ? frame->delta : 0.0f;
+
+        if (g_sinceAsk >= 1.0f)
+        {
+            g_sinceAsk = 0.0f;
+            AskAround();
+        }
+
+        // Broadcast player names once per second.
+        g_sinceNames += frame != nullptr ? frame->delta : 0.0f;
+
+        if (g_sinceNames >= 1.0f)
+        {
+            g_sinceNames = 0.0f;
+            Mp::Names::Set(g_myId, Mp::Names::Mine());
+
+            if (g_isHost && g_running && g_socket.IsOpen())
+            {
+                SendNames();
+            }
+        }
     }
 
     // Open the network socket.
@@ -1881,7 +2317,7 @@ namespace
             ? g_socket.Port() == static_cast<uint16_t>(g_settings.port)
             : g_settings.host != 0;
 
-        sprintf_s(g_name, sizeof(g_name), "az%u", static_cast<unsigned>(g_socket.Port()));
+        strcpy_s(g_name, sizeof(g_name), Mp::Names::Mine());
 
         g_running = true;
 
@@ -2050,6 +2486,9 @@ namespace
         {
             Console::Print("mp: client, waiting for a host to answer\n");
         }
+
+        Console::Printf("mp: lobby room %s\n", Hosting() ? "open and listed"
+            : (g_opened && g_isHost ? "open, listed once in a level" : "not opened (CREATE opens it)"));
 
         Console::Printf("mp: sent %llu, got %llu, ignored %llu, lost on purpose %llu\n", g_sent, g_received, g_ignored, g_dropped);
 
@@ -2251,7 +2690,7 @@ namespace
                 g_isHost = g_settings.host != 0;
                 Config::Set("mp_host", g_settings.host);
 
-                // Reset ids and room ownership after changing roles.
+                // Reset ids and room ownership after role changes.
                 g_myId = 0;
                 g_host = Mp::Address{};
 
@@ -2559,6 +2998,7 @@ AMOD_EXPORT int __cdecl AmodInit(const AmodApi* api)
     srand(GetTickCount());
 
     ReadSettings();
+    Mp::Names::Open();
 
     if (!Mp::NetStartup())
     {
@@ -2591,6 +3031,7 @@ AMOD_EXPORT int __cdecl AmodInit(const AmodApi* api)
 
     Mp::Bodies::Open();
     Mp::Menus::Open();
+    Mp::Lobby::Answer(&OpenRoom, &JoinRoom, &CloseRoom);
     Mp::Spent::Watch();
 
     ResetOwners();
@@ -2623,6 +3064,7 @@ AMOD_EXPORT void __cdecl AmodShutdown(void)
     DropAvatars();
     Mp::Bodies::Close();
     Mp::Menus::Close();
+    Mp::Names::Close();
     Mp::Focus::Release();
     Mp::Background::Release();
     Mp::Avatars::Forget();

@@ -25,6 +25,13 @@ namespace Mp
         void                                                        HoldFrame(float frame);
         float                                                       HeldFrame();
 
+        // The bodies of the last Show, for whatever draws beside them.
+        int                                                         ShownCount();
+        const Body*                                                 ShownAt(int index);
+        uint16_t                                                    ShownRoom();
+
+        bool                                                        Project(const float world[3], float& x, float& y);
+
         void                                                        Forget();
         void                                                        Report(void (*line)(const char* text));
     }

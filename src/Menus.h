@@ -7,9 +7,11 @@ namespace Mp
     {
         bool                                                        Open();
         void                                                        Close();
-
         void                                                        Block(bool block);
         bool                                                        Blocked();
+
+        bool                                                        Show();
+        bool                                                        Ready();
     }
 }
 

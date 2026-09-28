@@ -6,7 +6,12 @@
 
 namespace Mp
 {
-    const uint8_t                                                   PROTOCOL_VERSION = 14;
+    const uint8_t                                                   PROTOCOL_VERSION = 17;
+
+    const int                                                       MAX_PALACE = 20;
+
+    // The palace's first level as the castles screen names it; a joiner starts the same one.
+    const int                                                       MAX_LEVEL = 128;
 
     enum PacketType : uint8_t
     {
@@ -21,6 +26,9 @@ namespace Mp
         PACKET_WORLD = 8,       // whoever runs the room -> everybody else in it
         PACKET_ASK = 9,         // client -> host, open this one for me too
         PACKET_SPENT = 10,      // host -> clients, what the level has already given up
+        PACKET_WHO = 11,        // anybody -> an address, are you a room
+        PACKET_ROOM = 12,       // the answer: what room, which palace, how many
+        PACKET_NAMES = 13,      // host -> clients, once a second: who is who by id
     };
 
     // A dead body is still drawn; the game plays its death out.

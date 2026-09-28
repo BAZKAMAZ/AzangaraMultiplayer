@@ -71,7 +71,7 @@
       <EnableUAC>false</EnableUAC>
       <!-- Winsock. Named here as well as in the #pragma so the dependency is visible in the
            project, not only in a source file. -->
-      <AdditionalDependencies>ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -82,8 +82,11 @@
     <ClCompile Include="src\Mod.cpp" />
     <ClCompile Include="src\Net.cpp" />
     <ClCompile Include="src\Room.cpp" />
+    <ClCompile Include="src\Lobby.cpp" />
     <ClCompile Include="src\Menus.cpp" />
     <ClCompile Include="src\Spent.cpp" />
+    <ClCompile Include="src\Names.cpp" />
+    <ClCompile Include="src\TextInput.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\Avatars.h" />
@@ -93,8 +96,11 @@
     <ClInclude Include="src\Net.h" />
     <ClInclude Include="src\Protocol.h" />
     <ClInclude Include="src\Room.h" />
+    <ClInclude Include="src\Lobby.h" />
     <ClInclude Include="src\Menus.h" />
     <ClInclude Include="src\Spent.h" />
+    <ClInclude Include="src\Names.h" />
+    <ClInclude Include="src\TextInput.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

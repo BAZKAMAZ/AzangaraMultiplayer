@@ -1,5 +1,9 @@
 #include "Menus.h"
 
+#include "Lobby.h"
+#include "Names.h"
+#include "TextInput.h"
+
 #include <ForgeApi.h>
 
 #include <stdio.h>
@@ -18,6 +22,100 @@ namespace Mp
 
             const char* const MENUS[] = { "IDM_ESC_MENU", "IDM_MAIN_MENU" };
             const int MENU_COUNT = sizeof(MENUS) / sizeof(MENUS[0]);
+
+            const char* const MAIN_MENU = "IDM_MAIN_MENU";
+            const char* const LOBBY_MENU = "IDM_MP_LOBBY";
+            const char* const LOBBY_ITEM = "ID_MP_MENU";
+
+            struct Script
+            {
+                const char* menuId;
+                const char* file;
+            };
+
+            const Script SCRIPTS[] =
+            {
+                { LOBBY_MENU, "scripts/menu_lobby.txt" },
+                { "IDM_MP_NICK", "scripts/menu_nick.txt" },
+            };
+
+            const int SCRIPT_COUNT = sizeof(SCRIPTS) / sizeof(SCRIPTS[0]);
+
+            const char* const LOBBY_BACKGROUND = R"(
+                $images {
+                    $image {
+                        $texture "textures/lobby.jpg"
+                        $pos 0 480
+                        $size 640 480
+                        $unreg_only 0
+                    }
+                }
+            )";
+
+            const char* const LOBBY_ITEMS = R"(
+                $menu_items {
+                    $item {
+                        $id "ID_MP_CREATE"
+                        $text "CREATE ROOM"
+                        $pos 320 330
+                        $rect_size 300 45
+                        $plank_width 6
+                        $h_align "center"
+                        $v_align "center"
+                        $help "Open a room and wait for the others"
+                    }
+                    $item {
+                        $id "ID_MP_JOIN"
+                        $text "JOIN ROOM"
+                        $pos 320 280
+                        $rect_size 300 45
+                        $plank_width 6
+                        $h_align "center"
+                        $v_align "center"
+                        $help "Walk into somebody else's room"
+                    }
+                    $item {
+                        $id "ID_BACK"
+                        $text "BACK"
+                        $pos 320 90
+                        $rect_size 200 45
+                        $plank_width 6
+                        $h_align "center"
+                        $v_align "center"
+                        $help "Back to the main menu"
+                    }
+                }
+            )";
+
+            const char* const LOBBY_BUTTON =
+                "$menu_items\n"
+                "{\n"
+                "    $item\n"
+                "    {\n"
+                "        $v_align \"center\"\n"
+                "        $h_align \"center\"\n"
+                "\n"
+                "        $id \"ID_MP_MENU\"\n"
+                "        $text \"MULTIPLAYER\"\n"
+                "        $pos 320 340\n"
+                "        $rect_size 300 45\n"
+                "        $plank_width 9\n"
+                "        $sub_menu \"IDM_MP_LOBBY\"\n"
+                "\n"
+                "        $cursor3d\n"
+                "        {\n"
+                "            $orient 0.36 0 1.57\n"
+                "            $pos -3.6 2.15 -9\n"
+                "        }\n"
+                "\n"
+                "        $help \"Play online together\"\n"
+                "        $warning \"\"\n"
+                "        $unreg_enabled 1\n"
+                "    }\n"
+                "}\n";
+
+            bool g_ready = false;
+            bool g_registered = false;
 
             const int MAX_KEPT = 8;
 
@@ -143,15 +241,65 @@ namespace Mp
                 }
             }
 
+            void RegisterAll()
+            {
+                if (g_registered || !Box::IsAvailable())
+                {
+                    return;
+                }
+
+                g_registered = true;
+
+                for (int at = 0; at < SCRIPT_COUNT; ++at)
+                {
+                    const Script& script = SCRIPTS[at];
+                    bool made = Box::Exists(script.menuId) || Box::RegisterFromScript(script.menuId, script.file);
+
+                    if (!made && Same(script.menuId, LOBBY_MENU) && Box::Register(LOBBY_MENU))
+                    {
+                        made = true;
+                        Menu::Add(LOBBY_MENU, LOBBY_BACKGROUND);
+                        Menu::Add(LOBBY_MENU, LOBBY_ITEMS);
+                        Mp::Lobby::Build(LOBBY_MENU);
+                    }
+
+                    if (!made)
+                    {
+                        Log(AMOD_LOG_WARNING, "%s would not register from %s", script.menuId, script.file);
+                        continue;
+                    }
+
+                    Mp::TextInput::Load(script.menuId, script.file);
+
+                    g_ready = g_ready || Same(script.menuId, LOBBY_MENU);
+                }
+            }
+
             void __cdecl OnMenu(AmodMenuEvent event, void* data, void*)
             {
                 if (event == AMOD_MENU_LOADED)
                 {
                     const AmodMenuLoaded* const loaded = static_cast<const AmodMenuLoaded*>(data);
 
-                    if (loaded != nullptr)
+                    if (loaded == nullptr)
                     {
-                        Apply(loaded->menuId);
+                        return;
+                    }
+
+                    Apply(loaded->menuId);
+                    Mp::Lobby::Build(loaded->menuId);
+                    Mp::Names::Build(loaded->menuId);
+
+                    if (!Same(loaded->menuId, MAIN_MENU))
+                    {
+                        return;
+                    }
+
+                    RegisterAll();
+
+                    if (!Menu::Find(MAIN_MENU, LOBBY_ITEM).IsValid())
+                    {
+                        Menu::Add(MAIN_MENU, LOBBY_BUTTON);
                     }
 
                     return;
@@ -159,7 +307,18 @@ namespace Mp
 
                 AmodMenuClicked* const clicked = static_cast<AmodMenuClicked*>(data);
 
-                if (g_block && clicked != nullptr && Ours(clicked->itemId))
+                if (clicked == nullptr)
+                {
+                    return;
+                }
+
+                if (Mp::Lobby::Click(clicked->itemId) || Mp::Names::Click(clicked->itemId))
+                {
+                    clicked->handled = 1;
+                    return;
+                }
+
+                if (g_block && Ours(clicked->itemId))
                 {
                     clicked->handled = 1;
                 }
@@ -215,6 +374,16 @@ namespace Mp
         bool Blocked()
         {
             return g_block;
+        }
+
+        bool Show()
+        {
+            return g_ready && Box::Open(LOBBY_MENU);
+        }
+
+        bool Ready()
+        {
+            return g_ready;
         }
     }
 }

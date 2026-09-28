@@ -56,6 +56,22 @@ namespace Mp
                 out._44 = 1.0f;
             }
 
+            // The camera the level is drawn with, taken while it is being drawn: by the end of the frame the 2D pass has its own.
+            D3DMATRIX g_view = {};
+            D3DMATRIX g_projection = {};
+            D3DVIEWPORT8 g_viewport = {};
+            bool g_seenView = false;
+
+            void SeeView()
+            {
+                IDirect3DDevice8* const device = Render::Device();
+
+                g_seenView = device != nullptr &&
+                    device->GetTransform(D3DTS_VIEW, &g_view) == D3D_OK &&
+                    device->GetTransform(D3DTS_PROJECTION, &g_projection) == D3D_OK &&
+                    device->GetViewport(&g_viewport) == D3D_OK;
+            }
+
             void DrawThem();
 
             void __cdecl OnPlayerDrawn(const AmodModelDrawInfo* info, void*)
@@ -65,6 +81,8 @@ namespace Mp
                     memcpy(g_theirs, info->matrix, sizeof(g_theirs));
                     g_seenTheirs = true;
                 }
+
+                SeeView();
 
                 if (g_pending)
                 {
@@ -251,8 +269,70 @@ namespace Mp
             return g_holdFrame;
         }
 
+        int ShownCount()
+        {
+            return g_shownCount;
+        }
+
+        const Body* ShownAt(int index)
+        {
+            return index >= 0 && index < g_shownCount ? &g_shown[index] : nullptr;
+        }
+
+        uint16_t ShownRoom()
+        {
+            return g_shownRoom;
+        }
+
+        bool Project(const float world[3], float& x, float& y)
+        {
+            int wide = 0;
+            int tall = 0;
+
+            Render::Viewport(&wide, &tall);
+
+            if (!g_seenView || wide <= 0 || tall <= 0)
+            {
+                return false;
+            }
+
+            // Row vectors, as Direct3D multiplies them: world, then view, then projection.
+            const D3DMATRIX& v = g_view;
+            const D3DMATRIX& p = g_projection;
+
+            const float ex = world[0] * v._11 + world[1] * v._21 + world[2] * v._31 + v._41;
+            const float ey = world[0] * v._12 + world[1] * v._22 + world[2] * v._32 + v._42;
+            const float ez = world[0] * v._13 + world[1] * v._23 + world[2] * v._33 + v._43;
+
+            const float cx = ex * p._11 + ey * p._21 + ez * p._31 + p._41;
+            const float cy = ex * p._12 + ey * p._22 + ez * p._32 + p._42;
+            const float cw = ex * p._14 + ey * p._24 + ez * p._34 + p._44;
+
+            if (cw <= 0.0001f)
+            {
+                return false;
+            }
+
+            const float nx = cx / cw;
+            const float ny = cy / cw;
+
+            if (nx < -1.2f || nx > 1.2f || ny < -1.2f || ny > 1.2f)
+            {
+                return false;
+            }
+
+            const float px = g_viewport.X + (nx + 1.0f) * 0.5f * g_viewport.Width;
+            const float py = g_viewport.Y + (1.0f - ny) * 0.5f * g_viewport.Height;
+
+            x = px * AMOD_MENU_WIDE / static_cast<float>(wide);
+            y = py * AMOD_MENU_TALL / static_cast<float>(tall);
+            return true;
+        }
+
         void Forget()
         {
+            g_seenView = false;
+
             if (g_watch != AMOD_INVALID_TOKEN)
             {
                 Mmd::Cancel(g_watch);

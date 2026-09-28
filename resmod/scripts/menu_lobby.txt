@@ -1,0 +1,336 @@
+$header
+{
+	$menu_id "IDM_MP_LOBBY"
+	$draw_world 0
+
+	$input_color 1 1 1 1
+	$input_scale 1 1
+
+	$table_input_color 1 1 1 0.5
+	$table_input_scale 0.9 0.9
+
+	$input_message "Type the address of the room"
+
+	$rect_offs -31 -13
+	$rect_size 586 30
+}
+
+$images
+{
+	$image
+	{
+		$texture "textures/lobby.jpg"
+		$pos 0 480
+		$size 640 480
+		$unreg_only 0
+	}
+
+	$image
+	{
+		$texture "textures/frame/right.tga"
+		$pos 10 324
+		$size 32 32
+		$horz_flip
+		$vert_rept 9
+		$unreg_only 0
+	}
+	$image
+	{
+		$texture "textures/frame/up_left.tga"
+		$offs 0 64
+		$size 64 64
+		$unreg_only 0
+	}
+	$image
+	{
+		$texture "textures/frame/horiz.tga"
+		$offs 54 32
+		$size 32 32
+		$horz_rept 16
+		$unreg_only 0
+	}
+	$image
+	{
+		$texture "textures/frame/up_left.tga"
+		$offs 501 -32
+		$size 64 64
+		$horz_flip
+		$unreg_only 0
+	}
+	$image
+	{
+		$texture "textures/frame/right.tga"
+		$offs 32 -64
+		$size 32 32
+		$vert_rept 9
+		$unreg_only 0
+	}
+	$image
+	{
+		$texture "textures/frame/horiz.tga"
+		$offs -576 -275
+		$size 32 32
+		$horz_rept 10
+		$unreg_only 0
+	}
+	$image
+	{
+		$texture "textures/frame/horiz.tga"
+		$offs 310 0
+		$size 32 32
+		$horz_rept 9
+		$unreg_only 0
+	}
+}
+
+$images_anim
+{
+	$image
+	{
+		$pos 24 432
+		$size 96 96
+		$frames
+		{
+			$texture "textures/menu/flame01.tga"
+			$texture "textures/menu/flame02.tga"
+			$texture "textures/menu/flame03.tga"
+			$texture "textures/menu/flame04.tga"
+			$texture "textures/menu/flame05.tga"
+			$fps 10
+		}
+		$unreg_only 0
+	}
+	$image
+	{
+		$pos 520 432
+		$size 96 96
+		$frames
+		{
+			$texture "textures/menu/flame01.tga"
+			$texture "textures/menu/flame02.tga"
+			$texture "textures/menu/flame03.tga"
+			$texture "textures/menu/flame04.tga"
+			$texture "textures/menu/flame05.tga"
+			$fps 10
+		}
+		$unreg_only 0
+	}
+}
+
+$castle_buttons
+{
+	$button
+	{
+		$v_align "center"
+		$h_align "center"
+
+		$id "ID_MP_PALACE"
+		$pos 320 440
+		$img_size 72 72
+		$rect_size 84 34
+
+		$img_enabled "textures/menu/tutorial.png"
+
+		$item_anim
+		{
+			$scale_passive 0.982 0.982
+			$scale_active 1 1
+			$scale_disabled 0.95 0.95
+			$scale_blocked 0.982 0.982
+		}
+
+		$part_count 26
+		$part_radius 65 20
+		$part_disp 5
+
+		$text_castle
+		{
+			$text "-"
+			$pos 3 42
+			$font_scale 0.6875 0.6875
+			$font_color 1 1 1 1
+			$line_height 0
+			$align "left"
+			$unreg_only 0
+		}
+
+		$help "The palace your room will be played in"
+		$warning ""
+
+		$unreg_enabled 1
+	}
+}
+
+$img_buttons
+{
+	$button
+	{
+		$id "ID_MP_PREV"
+
+		$pos 248 440
+		$rect_size 40 40
+
+		$v_align "center"
+		$h_align "center"
+
+		$img_enabled "textures/menu/arrow_left_act.tga"
+		$img_disabled "textures/menu/arrow_left.tga"
+
+		$help "The palace before this one"
+		$warning ""
+
+		$item_anim
+		{
+			$color_passive 0.7 0.7 0.7 1
+			$color_active 1 1 1 1
+			$color_disabled 0.7 0.7 0.7 0.5
+			$color_blocked 0.5 0 0 1
+
+			$scale_passive 0.9 0.9
+			$scale_active 1 1
+		}
+
+		$unreg_enabled 1
+	}
+
+	$button
+	{
+		$id "ID_MP_NEXT"
+
+		$pos 392 440
+		$rect_size 40 40
+
+		$v_align "center"
+		$h_align "center"
+
+		$img_enabled "textures/menu/arrow_right_act.tga"
+		$img_disabled "textures/menu/arrow_right.tga"
+
+		$help "The palace after this one"
+		$warning ""
+
+		$item_anim
+		{
+			$color_passive 0.7 0.7 0.7 1
+			$color_active 1 1 1 1
+			$color_disabled 0.7 0.7 0.7 0.5
+			$color_blocked 0.5 0 0 1
+
+			$scale_passive 0.9 0.9
+			$scale_active 1 1
+		}
+
+		$unreg_enabled 1
+	}
+}
+
+$text_buttons
+{
+	$button
+	{
+		$id "ID_MP_CREATE"
+		$pos 131 389
+		$text "Create"
+		$rect_size 130 30
+		$v_align "center"
+		$h_align "center"
+
+		$help "Open a room in this palace and wait for the others"
+		$warning ""
+
+		$unreg_enabled 1
+		$keyctrl_button 0
+	}
+
+	$button
+	{
+		$id "ID_MP_JOIN"
+		$pos 320 389
+		$text "Join"
+		$rect_size 130 30
+		$v_align "center"
+		$h_align "center"
+
+		$help "Walk into the room picked below, or type an address"
+		$warning ""
+
+		$unreg_enabled 1
+		$keyctrl_button 0
+	}
+
+	$button
+	{
+		$id "ID_BACK"
+		$pos 507 389
+		$text "Close"
+		$rect_size 130 30
+		$v_align "center"
+		$h_align "center"
+
+		$help "Back to the main menu"
+		$warning ""
+
+		$unreg_enabled 1
+		$keyctrl_button 0
+	}
+}
+
+$tables
+{
+	$table
+	{
+		$id "ID_MP_ROOMS"
+
+		$header_color 1 0.4 1 1
+		$header_scale 1 1
+
+		$body_color 1 1 1 1
+		$body_scale 0.95 0.95
+
+		$line_pos 350
+		$line_step 29
+		$line_count 10
+		$lines_vert_align "center"
+
+		$point_step 20
+		$point_margin 10
+
+		// The line's own number, the way the records screen counts its ten down the left.
+		$col
+		{
+			$title ""
+			$horz_pos 62
+			$align "right"
+		}
+
+		$col
+		{
+			$title "Ping"
+			$horz_pos 150
+			$align "right"
+			$fixed 17
+		}
+
+		$col
+		{
+			$title "Room"
+			$horz_pos 176
+			$align "left"
+		}
+
+		$col
+		{
+			$title "Palace"
+			$horz_pos 366
+			$align "left"
+		}
+
+		$col
+		{
+			$title "Players"
+			$horz_pos 586
+			$align "right"
+			$fixed 17
+		}
+	}
+}
