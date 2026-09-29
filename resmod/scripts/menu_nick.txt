@@ -3,7 +3,6 @@ $header
 	$menu_id "IDM_MP_NICK"
 }
 
-
 $images
 {
 	$image
@@ -131,6 +130,37 @@ $images
 		$size 148 36
 		$unreg_only 0
 	}
+
+//----------------------------------
+// рамка поля ввода
+	$image
+	{
+		$texture "textures/menu/text_field_left.png"
+		$pos 140 245
+		$size 30 40
+		$unreg_only 0
+	}
+	$image
+	{
+		$texture "textures/menu/text_field_tile.png"
+		$pos 170 245
+		$size 30 40
+		$horz_rept 10
+		$unreg_only 0
+	}
+	$image
+	{
+		$texture "textures/menu/text_field_right.png"
+		$pos 470 245
+		$size 30 40
+		$unreg_only 0
+	}
+}
+
+$input
+{
+	$id "ID_MP_NICK_FIELD"
+	$length 16
 }
 
 $static_text
@@ -145,15 +175,18 @@ $static_text
 		$align "left"
 		$unreg_only 0
 	}
-}
 
-$input
-{
-	$id "ID_MP_NICK_FIELD"
-	$pos 199 205
-	$scale 0.55 0.55
-	$length 16
-	$font_scale 0.8
+	$static
+	{
+		$id "ID_MP_NICK_FIELD"
+		$text "_"
+		$pos 158 214
+		$font_scale 0.8 0.8
+		$font_color 1 1 1 1
+		$line_height 0
+		$align "left"
+		$unreg_only 0
+	}
 }
 
 $text_buttons
@@ -161,14 +194,11 @@ $text_buttons
 	$button
 	{
 		$id "ID_MP_NICK_OK"
-		$pos 320 143
+		$pos 320 155
 		$text "OK"
-		$rect_size 140 36
+		$rect_size 142 38
 		$v_align "center"
 		$h_align "center"
-
-		$help "Keep this nickname"
-		$warning ""
 
 		$unreg_enabled 1
 		$keyctrl_button 0

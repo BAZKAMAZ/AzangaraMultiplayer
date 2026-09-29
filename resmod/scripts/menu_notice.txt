@@ -1,0 +1,178 @@
+$header
+{
+	$menu_id "IDM_MP_NOTICE"
+}
+
+$images
+{
+	$image
+	{
+		$texture "textures/frame/a40.png"
+		$pos 0 480
+		$size 640 480
+		$unreg_only 0
+	}
+
+// фрейм
+	$image
+	{
+		$texture "textures/frame/inner.jpg"
+		$pos 97 305
+		$size 32 32
+		$horz_rept 14
+		$vert_rept 5
+		$unreg_only 0
+	}
+
+// горизонтальная планка вверху справа
+	$image
+	{
+		$texture "textures/frame/center_2.png"
+		$pos 69 321
+		$size 40 40
+		$unreg_only 0
+	}
+	$image
+	{
+		$texture "textures/frame/center_2.png"
+		$offs 463 0
+		$size 40 40
+		$unreg_only 0
+	}
+	$image
+	{
+		$texture "textures/frame/horiz_2.png"
+		$offs -431 0
+		$size 40 40
+		$horz_rept 11
+		$unreg_only 0
+	}
+
+// вертикальная планка справа
+	$image
+	{
+		$texture "textures/frame/center_2.png"
+		$offs 431 -149
+		$size 40 40
+		$unreg_only 0
+	}
+	$image
+	{
+		$texture "textures/frame/vert_2.png"
+		$offs 0 113
+		$size 40 40
+		$vert_rept 3
+		$unreg_only 0
+	}
+
+// вертикальная планка слева
+	$image
+	{
+		$texture "textures/frame/center_2.png"
+		$offs -463 -113
+		$size 40 40
+		$unreg_only 0
+	}
+	$image
+	{
+		$texture "textures/frame/vert_2.png"
+		$offs 0 113
+		$size 40 40
+		$vert_rept 3
+		$unreg_only 0
+	}
+// горизонтальная планка внизу
+	$image
+	{
+		$texture "textures/frame/horiz_2.png"
+		$offs 32 -113
+		$size 40 40
+		$horz_rept 4
+		$unreg_only 0
+	}
+// горизонтальная планка внизу
+	$image
+	{
+		$texture "textures/frame/horiz_2.png"
+		$offs 280 0
+		$size 40 40
+		$horz_rept 4
+		$unreg_only 0
+	}
+
+//----------------------------------
+// окантовка кнопки OK внизу
+	$image
+	{
+		$texture "textures/menu/text_field_left.png"
+		$offs -144 11
+		$size 55 55
+		$unreg_only 0
+	}
+	$image
+	{
+		$texture "textures/menu/text_field_tile.png"
+		$offs 55 0
+		$size 55 55
+		$unreg_only 0
+	}
+	$image
+	{
+		$texture "textures/menu/text_field_right.png"
+		$offs 55 0
+		$size 55 55
+		$unreg_only 0
+	}
+	$image
+	{
+		$texture "textures/menu/curs_rect.tga"
+		$offs -101 -10
+		$size 148 36
+		$unreg_only 0
+	}
+}
+
+$static_text
+{
+/*	$static
+	{
+		$text "Multiplayer"
+		$pos 240 250
+		$font_scale 0.9 0.9
+		$font_color 1 0.4 1 1
+		$line_height -27
+		$align "left"
+		$unreg_only 0
+	}*/
+
+	$static
+	{
+		$id "ID_MP_NOTICE_TEXT"
+		$text "-"
+		$pos 321 225
+		$font_scale 0.8 0.8
+		$font_color 1 1 1 1
+		$line_height -27
+		$align "center"
+		$unreg_only 0
+	}
+}
+
+$text_buttons
+{
+	$button
+	{
+		$id "ID_MP_NOTICE_OK"
+		$pos 320 155
+		$text "OK"
+		$rect_size 142 38
+		$v_align "center"
+		$h_align "center"
+
+		$help ""
+		$warning ""
+
+		$unreg_enabled 1
+		$keyctrl_button 0
+	}
+}

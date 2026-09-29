@@ -6,11 +6,10 @@
 
 namespace Mp
 {
-    const uint8_t                                                   PROTOCOL_VERSION = 17;
+    const uint8_t                                                   PROTOCOL_VERSION = 18;
 
     const int                                                       MAX_PALACE = 20;
 
-    // The palace's first level as the castles screen names it; a joiner starts the same one.
     const int                                                       MAX_LEVEL = 128;
 
     enum PacketType : uint8_t
@@ -29,6 +28,7 @@ namespace Mp
         PACKET_WHO = 11,        // anybody -> an address, are you a room
         PACKET_ROOM = 12,       // the answer: what room, which palace, how many
         PACKET_NAMES = 13,      // host -> clients, once a second: who is who by id
+        PACKET_REFUSED = 14,    // host -> a knocking client: not let in, and why
     };
 
     // A dead body is still drawn; the game plays its death out.
@@ -92,6 +92,7 @@ namespace Mp
         case PACKET_STATE:   return "STATE";
         case PACKET_EVENT:   return "EVENT";
         case PACKET_BYE:     return "BYE";
+        case PACKET_REFUSED: return "REFUSED";
         default:             return "?";
         }
     }

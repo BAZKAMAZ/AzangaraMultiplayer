@@ -1,10 +1,9 @@
 #include "Names.h"
-
 #include "Avatars.h"
 #include "TextInput.h"
 
 #include <ForgeApi.h>
-
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -17,7 +16,6 @@ namespace Mp
         namespace
         {
             const char* const MAIN_MENU = "IDM_MAIN_MENU";
-            // Registered with the lobby in Menus.cpp, from resmod/scripts/menu_nick.txt.
             const char* const NICK_MENU = "IDM_MP_NICK";
 
             const char* const NICK_ITEM = "ID_MP_NICK";
@@ -27,7 +25,6 @@ namespace Mp
             const char* const NICK_KEY = "mp_name";
             const char* const LIFT_KEY = "mp_name_lift";
 
-            // Bottom right of the main menu, in script space (y up); the nickname sits to the left of it.
             const float ICON_X = 612.0f;
             const float ICON_Y = 30.0f;
             const float ICON_SIZE = 36.0f;
@@ -62,7 +59,51 @@ namespace Mp
                 }
             )";
 
-            const int ALIGN_RIGHT_MIDDLE = 0x22;
+            const float BADGE_RIGHT = ICON_X - ICON_SIZE * 0.5f - 6.0f;
+            const float BADGE_LETTER = 16.0f;
+            const float BADGE_PAD = 20.0f;
+            const float BADGE_TALL = 28.0f;
+            const float BADGE_FONT = 0.8f;
+            const float BADGE_TEXT_LIFT = -12.0f;
+
+            const char* const BADGE_FORMAT = R"(
+                $images
+                {
+                    $image
+                    {
+                        $texture "textures/frame/a40.png"
+                        $pos %.0f %.0f
+                        $size %.0f %.0f
+                        $unreg_only 0
+                    }
+                    $image
+                    {
+                        $texture "textures/frame/a40.png"
+                        $pos %.0f %.0f
+                        $size %.0f %.0f
+                        $unreg_only 0
+                    }
+                }
+                $static_text
+                {
+                    $static
+                    {
+                        $id "ID_MP_NICK_BADGE"
+                        $text "%s"
+                        $pos %.0f %.0f
+                        $font_scale %.2f %.2f
+                        $font_color 1 1 1 1
+                        $line_height 0
+                        $align "center"
+                        $unreg_only 0
+                    }
+                }
+            )";
+
+            const char* const BADGE_TEXT = "ID_MP_NICK_BADGE";
+
+            float g_badgeWide = 0.0f;
+
             const int ALIGN_CENTRE = 0x24;
 
             const float LETTER = 11.0f;
@@ -74,13 +115,14 @@ namespace Mp
 
             AmodToken g_frame = AMOD_INVALID_TOKEN;
 
-            // Adding the button builds the main menu again, which comes back here; once is enough.
             bool g_building = false;
 
             bool Same(const char* one, const char* other)
             {
                 return one != nullptr && other != nullptr && strcmp(one, other) == 0;
             }
+
+            void UpdateBadge();
 
             // Spaces off both ends; nothing left keeps the old one.
             void Accept()
@@ -108,6 +150,7 @@ namespace Mp
                 strcpy_s(g_mine, sizeof(g_mine), name);
                 Config::Set(NICK_KEY, g_mine, true);
                 Console::Printf("mp: you are %s now\n", g_mine);
+                UpdateBadge();
             }
 
             void __cdecl OnSubmit(const char* menuId, const char* fieldId)
@@ -119,22 +162,94 @@ namespace Mp
                 }
             }
 
-            void Strip(const char* text, float x, float y, float scale, int align)
+            void Strip(const char* text, float x, float y, float scale)
             {
                 const float wide = static_cast<float>(strlen(text)) * LETTER * scale + 12.0f;
                 const float tall = 26.0f * scale;
-                const float left = align == ALIGN_CENTRE ? x - wide * 0.5f : x - wide + 6.0f;
 
-                Render::Rect(left, y - tall * 0.5f, wide, tall, 0x99000000);
-                Render::Text(Render::GetFont("bigitem"), x, y, text, scale, 0xFFFFFFFF, align);
+                Render::Rect(x - wide * 0.5f, y - tall * 0.5f, wide, tall, 0x99000000);
+                Render::Text(Render::GetFont("bigitem"), x, y, text, scale, 0xFFFFFFFF, ALIGN_CENTRE);
             }
 
-            void DrawBadge()
+            // A quote would end the script's string early.
+            void Shown(char* shown, size_t size)
             {
-                const float x = ICON_X - ICON_SIZE * 0.5f - 8.0f;
-                const float y = AMOD_MENU_TALL - ICON_Y;
+                strncpy_s(shown, size, g_mine, _TRUNCATE);
 
-                Strip(g_mine, x, y, 0.8f, ALIGN_RIGHT_MIDDLE);
+                for (char* at = shown; *at != 0; ++at)
+                {
+                    *at = *at == '"' ? '\'' : *at;
+                }
+            }
+
+            // Whole pixels, so the size read back from the menu compares equal to it.
+            float BadgeWide(const char* shown)
+            {
+                return static_cast<float>(strlen(shown)) * BADGE_LETTER + BADGE_PAD;
+            }
+
+            void UpdateBadge()
+            {
+                if (g_badgeWide <= 0.0f)
+                {
+                    return;
+                }
+
+                char shown[MAX_NAME + 1] = {};
+                Shown(shown, sizeof(shown));
+
+                const float wide = BadgeWide(shown);
+                const int count = Menu::Count(MAIN_MENU);
+
+                for (int at = 0; at < count; ++at)
+                {
+                    const Menu::Element piece = Menu::At(MAIN_MENU, at);
+
+                    if (!piece.IsValid())
+                    {
+                        continue;
+                    }
+
+                    const char* const kind = piece["kind"].Text("");
+
+                    if (strcmp(kind, "static") == 0 && Same(piece["id"].Text(""), BADGE_TEXT))
+                    {
+                        piece["text"].Set(shown);
+                        piece["pos"].Set(piece["pos"].Number(0) + (g_badgeWide - wide) * 0.5f, piece["pos"].Number(1));
+                        continue;
+                    }
+
+                    if (strcmp(kind, "image") != 0 || fabsf(piece["size"].Number(0) - g_badgeWide) > 0.5f 
+                        || fabsf(piece["size"].Number(1) - BADGE_TALL) > 0.5f)
+                    {
+                        continue;
+                    }
+
+                    piece["pos"].Set(piece["pos"].Number(0) + g_badgeWide - wide, piece["pos"].Number(1));
+                    piece["size"].Set(wide, BADGE_TALL);
+                }
+
+                g_badgeWide = wide;
+            }
+
+            void AddBadge()
+            {
+                char shown[MAX_NAME + 1] = {};
+                Shown(shown, sizeof(shown));
+
+                const float wide = BadgeWide(shown);
+                const float left = BADGE_RIGHT - wide;
+                const float top = ICON_Y + BADGE_TALL * 0.5f;
+
+                char fragment[1536];
+
+                sprintf_s(fragment, BADGE_FORMAT,
+                    left, top, wide, BADGE_TALL,
+                    left, top, wide, BADGE_TALL,
+                    shown, left + wide * 0.5f, ICON_Y + BADGE_TEXT_LIFT, BADGE_FONT, BADGE_FONT);
+
+                Menu::Add(MAIN_MENU, fragment);
+                g_badgeWide = wide;
             }
 
             // The others over their heads, the host's word for who is who.
@@ -158,23 +273,16 @@ namespace Mp
 
                     if (name[0] != 0 && Avatars::Project(head, x, y))
                     {
-                        Strip(name, x, y, 0.6f, ALIGN_CENTRE);
+                        Strip(name, x, y, 0.6f);
                     }
                 }
             }
 
             void __cdecl OnFrame(const AmodFrame*, void*)
             {
-                TextInput::Draw();
-
                 const char* const current = Box::Current();
-                const char* const box = Box::BoxMenu();
 
-                if (Same(current, MAIN_MENU) && (box == nullptr || box[0] == 0))
-                {
-                    DrawBadge();
-                }
-                else if (World::IsLevelLoaded() && (current == nullptr || current[0] == 0))
+                if (World::IsLevelLoaded() && (current == nullptr || current[0] == 0))
                 {
                     DrawLabels();
                 }
@@ -239,6 +347,7 @@ namespace Mp
 
             if (!Menu::Find(MAIN_MENU, NICK_ITEM).IsValid())
             {
+                AddBadge();
                 Menu::Add(MAIN_MENU, NICK_BUTTON);
             }
 

@@ -1,11 +1,9 @@
 #include "Menus.h"
-
 #include "Lobby.h"
 #include "Names.h"
 #include "TextInput.h"
 
 #include <ForgeApi.h>
-
 #include <stdio.h>
 #include <string.h>
 
@@ -37,7 +35,24 @@ namespace Mp
             {
                 { LOBBY_MENU, "scripts/menu_lobby.txt" },
                 { "IDM_MP_NICK", "scripts/menu_nick.txt" },
+                { "IDM_MP_ADDRESS", "scripts/menu_address.txt" },
+                { "IDM_MP_NOTICE", "scripts/menu_notice.txt" },
             };
+
+            const char* const NOTICE_MENU = "IDM_MP_NOTICE";
+            const char* const NOTICE_TEXT = "ID_MP_NOTICE_TEXT";
+
+            char g_notice[256] = {};
+
+            bool g_noticeArmed = false;
+            int g_noticeWait = 0;
+            int g_noticeFrames = 0;
+            int g_noticeTries = 0;
+
+            const int NOTICE_LEAVE = 30;
+            const int NOTICE_SETTLE = 3;
+            const int NOTICE_RETRY = 30;
+            const int NOTICE_TRIES = 10;
 
             const int SCRIPT_COUNT = sizeof(SCRIPTS) / sizeof(SCRIPTS[0]);
 
@@ -159,7 +174,6 @@ namespace Mp
                 return nullptr;
             }
 
-            // Kept once, and only the first time: what the script wrote is what goes back.
             void Keep(const char* menu, const char* item, const char* warning, uint8_t warns)
             {
                 if (Find(menu, item) != nullptr || g_keptCount >= MAX_KEPT || menu == nullptr)
@@ -340,7 +354,8 @@ namespace Mp
 
         void Close()
         {
-            Block(false);
+            g_block = false;
+            g_keptCount = 0;
 
             if (g_onLoaded != AMOD_INVALID_TOKEN)
             {
@@ -384,6 +399,93 @@ namespace Mp
         bool Ready()
         {
             return g_ready;
+        }
+
+        bool SetStatic(const char* menuId, const char* staticId, const char* text)
+        {
+            const int count = Menu::Count(menuId);
+            Menu::Element last(nullptr);
+
+            for (int at = 0; at < count; ++at)
+            {
+                const Menu::Element piece = Menu::At(menuId, at);
+
+                if (!piece.IsValid() || strcmp(piece["kind"].Text(""), "static") != 0)
+                {
+                    continue;
+                }
+
+                if (strcmp(piece["id"].Text(""), staticId) == 0)
+                {
+                    return piece["text"].Set(text);
+                }
+
+                last = piece;
+            }
+
+            return last.IsValid() && last["text"].Set(text);
+        }
+
+        void Notice(const char* text, bool afterLevel)
+        {
+            strncpy_s(g_notice, sizeof(g_notice), text != nullptr ? text : "", _TRUNCATE);
+
+            g_noticeArmed = true;
+            g_noticeWait = afterLevel ? NOTICE_LEAVE : 0;
+            g_noticeFrames = 0;
+            g_noticeTries = 0;
+        }
+
+        void Tick()
+        {
+            if (g_notice[0] == 0 || !g_registered || !g_noticeArmed)
+            {
+                return;
+            }
+
+            if (g_noticeWait > 0)
+            {
+                --g_noticeWait;
+                return;
+            }
+
+            const char* const current = Box::Current();
+            const char* const box = Box::BoxMenu();
+
+            if (Same(box, NOTICE_MENU))
+            {
+                g_notice[0] = 0;
+                g_noticeArmed = false;
+                return;
+            }
+
+            if (!(Same(current, MAIN_MENU) || Same(current, LOBBY_MENU)) || (box != nullptr && box[0] != 0))
+            {
+                g_noticeFrames = 0;
+                return;
+            }
+
+            const int frame = g_noticeFrames++;
+
+            if (frame < NOTICE_SETTLE || (frame - NOTICE_SETTLE) % NOTICE_RETRY != 0)
+            {
+                return;
+            }
+
+            if (++g_noticeTries > NOTICE_TRIES)
+            {
+                Log(AMOD_LOG_WARNING, "%s would not open; the notice was: %s", NOTICE_MENU, g_notice);
+                g_notice[0] = 0;
+                g_noticeArmed = false;
+                return;
+            }
+
+            if (!SetStatic(NOTICE_MENU, NOTICE_TEXT, g_notice))
+            {
+                Log(AMOD_LOG_WARNING, "%s has no static text %s", NOTICE_MENU, NOTICE_TEXT);
+            }
+
+            Box::ShowBox(NOTICE_MENU);
         }
     }
 }

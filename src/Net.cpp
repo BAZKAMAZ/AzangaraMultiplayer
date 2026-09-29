@@ -185,6 +185,10 @@ namespace Mp
             return false;
         }
 
+        // Rooms on the same network are found by asking everybody at once; nothing breaks without it.
+        BOOL broadcast = TRUE;
+        setsockopt(handle, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&broadcast), sizeof(broadcast));
+
         sockaddr_in local = {};
         local.sin_family = AF_INET;
         local.sin_addr.s_addr = INADDR_ANY;
@@ -261,7 +265,7 @@ namespace Mp
         remote.sin_port = to.port;
 
         const int sent = sendto(static_cast<SOCKET>(m_handle), static_cast<const char*>(data), size, 0,
-                                reinterpret_cast<const sockaddr*>(&remote), sizeof(remote));
+            reinterpret_cast<const sockaddr*>(&remote), sizeof(remote));
 
         if (sent == SOCKET_ERROR)
         {
@@ -292,8 +296,8 @@ namespace Mp
         int length = sizeof(remote);
 
         const int read = recvfrom(static_cast<SOCKET>(m_handle),
-                                  static_cast<char*>(buffer), size, 0,
-                                  reinterpret_cast<sockaddr*>(&remote), &length);
+            static_cast<char*>(buffer), size, 0,
+            reinterpret_cast<sockaddr*>(&remote), &length);
 
         if (read == SOCKET_ERROR)
         {

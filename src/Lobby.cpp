@@ -1,10 +1,10 @@
 #include "Lobby.h"
+#include "TextInput.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
 #include <ForgeApi.h>
-
 #include <stdio.h>
 #include <string.h>
 
@@ -24,6 +24,12 @@ namespace Mp
             const char* const NEXT = "ID_MP_NEXT";
             const char* const CREATE = "ID_MP_CREATE";
             const char* const JOIN = "ID_MP_JOIN";
+            const char* const ENTER_IP = "ID_MP_ENTER_IP";
+
+            // IP address input menu.
+            const char* const ADDRESS_MENU = "IDM_MP_ADDRESS";
+            const char* const ADDRESS = "ID_MP_ADDRESS";
+            const char* const ADDRESS_OK = "ID_MP_ADDRESS_OK";
 
             Room g_rooms[MAX_ROOMS] = {};
             int g_roomCount = 0;
@@ -31,16 +37,15 @@ namespace Mp
             int g_picked = -1;
             bool g_lined = false;
 
-            // Where the script put the table, so the buttons over its lines land on them.
+            int g_clickedRow = -1;
+            DWORD g_clickedAt = 0;
 
-
-
+            // Room list row positions.
             const float LINE_FIRST = 350.0f;
             const float LINE_STEP = 29.0f;
             const float LINE_LEFT = 40.0f;
             const float LINE_RIGHT = 600.0f;
 
-            // The colour a picked line is written in, and the one the rest keep.
             const float PICKED[4] = { 1.0f, 0.4f, 1.0f, 1.0f };
 
             Opener g_open = nullptr;
@@ -52,18 +57,50 @@ namespace Mp
                 return one != nullptr && other != nullptr && strcmp(one, other) == 0;
             }
 
-            // The palaces the game has opened: ids from packs.sav, not paths.
             int Palaces()
             {
                 return Sav::IsAvailable() ? Sav::Count() : 0;
             }
 
-            // A castle button's $id is the palace id, its $start_level the level that id starts.
+            const char* const PICTURES[] = { "img_enabled", "img_disabled", "img_blocked" };
+            const int PICTURE_COUNT = sizeof(PICTURES) / sizeof(PICTURES[0]);
+
+            struct Picture
+            {
+                char name[128];
+                bool mipmapped;
+                bool hasAlpha;
+            };
+
             struct Castle
             {
                 char id[64];
                 char level[129];
+                Picture pictures[PICTURE_COUNT];
             };
+
+            // Default lobby button textures.
+            int g_ownPictures[PICTURE_COUNT] = {};
+            bool g_ownKept = false;
+
+            AmodTextureId g_loaded[PICTURE_COUNT] = {};
+
+            void Remember(Picture& picture, int handle)
+            {
+                picture = Picture{};
+
+                AmodTexture texture = {};
+                const AmodTextureId id = handle != 0 ? Textures::FromGame(static_cast<uint32_t>(handle)) : AMOD_INVALID_TEXTURE;
+
+                if (id == AMOD_INVALID_TEXTURE || !Textures::Get(id, texture) || texture.name == nullptr)
+                {
+                    return;
+                }
+
+                strncpy_s(picture.name, sizeof(picture.name), texture.name, _TRUNCATE);
+                picture.mipmapped = texture.mipmapped != 0;
+                picture.hasAlpha = texture.hasAlpha != 0;
+            }
 
             const int MAX_CASTLES = 32;
 
@@ -115,21 +152,84 @@ namespace Mp
 
                     strcpy_s(g_castles[slot].id, sizeof(g_castles[slot].id), id);
                     strcpy_s(g_castles[slot].level, sizeof(g_castles[slot].level), level);
+
+                    for (int picture = 0; picture < PICTURE_COUNT; ++picture)
+                    {
+                        Remember(g_castles[slot].pictures[picture], button[PICTURES[picture]].Integer(0));
+                    }
                 }
             }
 
-            // "" until a menu with that palace's castle button has been built.
-            const char* LevelOf(const char* id)
+            const Castle* CastleOf(const char* id)
             {
                 for (int at = 0; at < g_castleCount; ++at)
                 {
                     if (Same(g_castles[at].id, id))
                     {
-                        return g_castles[at].level;
+                        return &g_castles[at];
+                    }
+                }
+
+                return nullptr;
+            }
+
+            const char* LevelOf(const char* id)
+            {
+                const Castle* const castle = CastleOf(id);
+                return castle != nullptr ? castle->level : "";
+            }
+
+            const char* LevelAt(const char* address)
+            {
+                for (int at = 0; at < g_roomCount; ++at)
+                {
+                    if (Same(g_rooms[at].address, address))
+                    {
+                        return g_rooms[at].level;
                     }
                 }
 
                 return "";
+            }
+
+            void JoinRow(int row)
+            {
+                if (row < 0 || row >= g_roomCount)
+                {
+                    Console::Print("mp: pick a room or enter an address first\n");
+                    return;
+                }
+
+                if (g_join != nullptr)
+                {
+                    g_join(g_rooms[row].address, g_rooms[row].level);
+                }
+            }
+
+            bool JoinTyped()
+            {
+                const char* const address = TextInput::Text(ADDRESS);
+
+                if (address[0] == 0)
+                {
+                    Console::Print("mp: type an address first\n");
+                    return false;
+                }
+
+                if (g_join != nullptr)
+                {
+                    g_join(address, LevelAt(address));
+                }
+
+                return true;
+            }
+
+            void __cdecl OnSubmit(const char* menuId, const char* fieldId)
+            {
+                if (Same(menuId, ADDRESS_MENU) && Same(fieldId, ADDRESS) && JoinTyped())
+                {
+                    Box::Back();
+                }
             }
 
             void ShortName(const char* path, char* out, int size)
@@ -163,15 +263,54 @@ namespace Mp
                     return;
                 }
 
+                if (!g_ownKept)
+                {
+                    g_ownKept = true;
+
+                    for (int picture = 0; picture < PICTURE_COUNT; ++picture)
+                    {
+                        g_ownPictures[picture] = icon[PICTURES[picture]].Integer(0);
+                    }
+                }
+
                 char name[32] = "none";
+                const Castle* castle = nullptr;
 
                 if (Palaces() > 0)
                 {
                     g_palace = (g_palace % Palaces() + Palaces()) % Palaces();
                     ShortName(Sav::NameAt(g_palace), name, sizeof(name));
+                    castle = CastleOf(Sav::NameAt(g_palace));
 
-                    // The picture starts the palace itself, as on the castles screen.
                     icon["start_level"].Set(Palace());
+                }
+
+                for (int picture = 0; picture < PICTURE_COUNT; ++picture)
+                {
+                    const Picture* const wanted = castle != nullptr ? &castle->pictures[picture] : nullptr;
+                    AmodTextureId loaded = AMOD_INVALID_TEXTURE;
+
+                    if (wanted != nullptr && wanted->name[0] != 0 && Files::Read(wanted->name) > 0)
+                    {
+                        loaded = Textures::Load(wanted->name, wanted->mipmapped, wanted->hasAlpha);
+                    }
+
+                    const uint32_t handle = loaded != AMOD_INVALID_TEXTURE ? Textures::ToGame(loaded) : 0;
+
+                    icon[PICTURES[picture]].Set(handle != 0 ? static_cast<int>(handle) : g_ownPictures[picture]);
+
+                    // Release the previous texture.
+                    if (g_loaded[picture] != AMOD_INVALID_TEXTURE)
+                    {
+                        Textures::Release(g_loaded[picture]);
+                    }
+
+                    g_loaded[picture] = handle != 0 ? loaded : AMOD_INVALID_TEXTURE;
+
+                    if (handle == 0 && loaded != AMOD_INVALID_TEXTURE)
+                    {
+                        Textures::Release(loaded);
+                    }
                 }
 
                 icon["caption.text"].Set(name);
@@ -244,9 +383,6 @@ namespace Mp
             }
         }
 
-        // A line of a table cannot be clicked - it is drawn, not built. So a button is laid over
-        // each one: invisible while nothing is under it, faintly lit when something is, and it
-        // reports its click the way every other button does.
         void BuildLines()
         {
             if (g_lined || !Menu::IsAvailable())
@@ -286,7 +422,6 @@ namespace Mp
 
                 if (row.IsValid())
                 {
-                    // Seen only under the cursor: passive is nothing at all.
                     row["anim.color_passive"].Set(1.0f, 1.0f, 1.0f, 0.0f);
                     row["anim.color_active"].Set(1.0f, 1.0f, 1.0f, 0.45f);
                     row["anim.color_disabled"].Set(1.0f, 1.0f, 1.0f, 0.0f);
@@ -309,13 +444,14 @@ namespace Mp
             g_open = open;
             g_join = join;
             g_close = close;
+
+            TextInput::Answer(&OnSubmit);
         }
 
         void Build(const char* menuId)
         {
             Learn(menuId);
 
-            // Main menu means out of the level or back from the lobby: the opened room is left.
             if (Same(menuId, MAIN_MENU) && g_close != nullptr)
             {
                 g_close();
@@ -343,8 +479,10 @@ namespace Mp
 
                 g_palace += Same(itemId, NEXT) ? 1 : -1;
                 ShowPalace();
+
                 Console::Printf("mp: palace %s -> %s\n", Sav::NameAt(g_palace),
                     Palace()[0] != 0 ? Palace() : "no castle button names it yet");
+
                 return true;
             }
 
@@ -352,9 +490,33 @@ namespace Mp
 
             if (row >= 0)
             {
+                const DWORD now = GetTickCount();
+                const bool twice = row == g_clickedRow && now - g_clickedAt <= GetDoubleClickTime();
+
                 g_picked = row < g_roomCount ? row : -1;
+                g_clickedRow = twice ? -1 : row;
+                g_clickedAt = now;
                 Fill();
+
+                if (twice)
+                {
+                    JoinRow(g_picked);
+                }
+
                 return true;
+            }
+
+            if (Same(itemId, ENTER_IP))
+            {
+                TextInput::SetText(ADDRESS, g_picked >= 0 && g_picked < g_roomCount
+                    ? g_rooms[g_picked].address : Config::Text("mp_peer", ""));
+
+                return false;
+            }
+
+            if (Same(itemId, ADDRESS_OK))
+            {
+                return !JoinTyped();
             }
 
             if (Same(itemId, CREATE))
@@ -369,17 +531,7 @@ namespace Mp
 
             if (Same(itemId, JOIN))
             {
-                const int room = g_picked >= 0 && g_picked < g_roomCount ? g_picked : 0;
-
-                if (g_join != nullptr && g_roomCount > 0)
-                {
-                    g_join(g_rooms[room].address, g_rooms[room].level);
-                }
-                else
-                {
-                    Console::Print("mp: no room to join yet; set one with mp peer <address>\n");
-                }
-
+                JoinRow(g_picked);
                 return true;
             }
 

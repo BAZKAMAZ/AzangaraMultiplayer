@@ -14,8 +14,6 @@ namespace Mp
         const char*                                                 Text(const char* fieldId);
         void                                                        SetText(const char* fieldId, const char* text);
 
-        void                                                        Draw();
-
         void                                                        Close();
     }
 }

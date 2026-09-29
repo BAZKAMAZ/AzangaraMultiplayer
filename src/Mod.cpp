@@ -242,6 +242,37 @@ namespace
     int g_jumpKeyCount = -1;
 
     const double PEER_TIMEOUT = 5.0;
+    const double RECONNECT_TIME = 10.0;
+
+    double g_netTroubleAt = 0.0;
+
+    // WSAENETDOWN, WSAENETUNREACH, WSAENETRESET, WSAEHOSTUNREACH; winsock2.h
+    const int NET_DOWN = 10050;
+    const int NET_UNREACHABLE = 10051;
+    const int NET_RESET = 10052;
+    const int HOST_UNREACHABLE = 10065;
+
+    // How recent a failed send must be to blame the network.
+    const double NET_TROUBLE_FRESH = 10.0;
+
+    const char* const NOTICE_NICK = "Your nickname is already taken in this room";
+    const char* const NOTICE_HOST_LEFT = "The host has left the room";
+    const char* const NOTICE_NET_LOST = "Connection lost: check your internet";
+    const char* const NOTICE_NO_ROOM = "Could not connect to the room";
+
+    // Client side: the host that went quiet and since when; 0 while the host is heard.
+    Mp::Address g_lostHost = {};
+    double g_hostLostAt = 0.0;
+
+    struct Gone
+    {
+        Mp::Address address;
+        uint8_t id;
+        double at;
+    };
+
+    Gone g_gone[MAX_PEERS] = {};
+    int g_goneCount = 0;
 
     float g_sinceTick = 0.0f;
     Mp::Avatars::Drawn g_drawn = {};
@@ -292,20 +323,94 @@ namespace
 
     // Peer management.
 
-    uint8_t FreeId()
+    bool IdTaken(uint8_t id)
     {
-        for (uint8_t id = 1; id <= MAX_PEERS; ++id)
+        for (int at = 0; at < g_peerCount; ++at)
         {
-            bool taken = false;
-
-            for (int at = 0; at < g_peerCount && !taken; ++at)
+            if (g_peers[at].id == id)
             {
-                taken = g_peers[at].id == id;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    void ForgetOldGone()
+    {
+        const double now = Now();
+        int kept = 0;
+
+        for (int at = 0; at < g_goneCount; ++at)
+        {
+            if (now - g_gone[at].at < RECONNECT_TIME)
+            {
+                g_gone[kept++] = g_gone[at];
+            }
+        }
+
+        g_goneCount = kept;
+    }
+
+    bool IdKeptForGone(uint8_t id)
+    {
+        for (int at = 0; at < g_goneCount; ++at)
+        {
+            if (g_gone[at].id == id)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    void RememberGone(const Mp::Address& address, uint8_t id)
+    {
+        ForgetOldGone();
+
+        if (id == 0 || g_goneCount >= MAX_PEERS)
+        {
+            return;
+        }
+
+        g_gone[g_goneCount++] = Gone{ address, id, Now() };
+    }
+
+    // The id a returning player had, or 0.
+    uint8_t TakeGone(const Mp::Address& address)
+    {
+        ForgetOldGone();
+
+        for (int at = 0; at < g_goneCount; ++at)
+        {
+            if (!(g_gone[at].address == address))
+            {
+                continue;
             }
 
-            if (!taken)
+            const uint8_t id = g_gone[at].id;
+
+            g_gone[at] = g_gone[--g_goneCount];
+            return IdTaken(id) ? 0 : id;
+        }
+
+        return 0;
+    }
+
+    uint8_t FreeId()
+    {
+        ForgetOldGone();
+
+        // Ids of players who may still come back are the last resort.
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            for (uint8_t id = 1; id <= MAX_PEERS; ++id)
             {
-                return id;
+                if (!IdTaken(id) && (pass == 1 || !IdKeptForGone(id)))
+                {
+                    return id;
+                }
             }
         }
 
@@ -418,7 +523,14 @@ namespace
 
         if (g_socket.Send(to, data, size) < 0)
         {
-            Log(AMOD_LOG_WARNING, "sending to %s failed with %d", Mp::ToText(to), g_socket.LastError());
+            const int error = g_socket.LastError();
+
+            if (error == NET_DOWN || error == NET_UNREACHABLE || error == HOST_UNREACHABLE || error == NET_RESET)
+            {
+                g_netTroubleAt = Now();
+            }
+
+            Log(AMOD_LOG_WARNING, "sending to %s failed with %d", Mp::ToText(to), error);
             return;
         }
 
@@ -458,6 +570,45 @@ namespace
         }
 
         SendTo(to, buffer, writer.Size());
+    }
+
+    const int MAX_REASON = 63;
+
+    void SendRefused(const Mp::Address& to, const char* why)
+    {
+        uint8_t buffer[Mp::MAX_PACKET];
+        Mp::Writer writer(buffer, sizeof(buffer));
+
+        writer.Header(Mp::PACKET_REFUSED, g_sequence++);
+        writer.Text(why, MAX_REASON);
+
+        if (!writer.Overflowed())
+        {
+            SendTo(to, buffer, writer.Size());
+        }
+    }
+
+    bool NameTaken(const char* name, const Mp::Address& from)
+    {
+        if (name == nullptr || name[0] == 0)
+        {
+            return false;
+        }
+
+        if (_stricmp(name, Mp::Names::Mine()) == 0)
+        {
+            return true;
+        }
+
+        for (int at = 0; at < g_peerCount; ++at)
+        {
+            if (g_peers[at].id != 0 && !(g_peers[at].address == from) && _stricmp(name, g_peers[at].name) == 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // Host sends the player-name list.
@@ -561,8 +712,7 @@ namespace
 
         for (int axis = 0; axis < 3; ++axis)
         {
-            body.position[axis] = was.position[axis] +
-                (latest.position[axis] - was.position[axis]) * part;
+            body.position[axis] = was.position[axis] + (latest.position[axis] - was.position[axis]) * part;
         }
 
         // Interpolate facing via the shortest path.
@@ -715,9 +865,13 @@ namespace
         char level[Mp::MAX_LEVEL + 1];
     };
 
-    Known g_known[MAX_PEERS + 1] = {};
+    const int MAX_KNOWN = 32;
+
+    Known g_known[MAX_KNOWN] = {};
     int g_knownCount = 0;
     float g_sinceAsk = 0.0f;
+
+    double g_askedEverybody = 0.0;
 
     Known* KnownAt(const Mp::Address& where)
     {
@@ -729,12 +883,27 @@ namespace
             }
         }
 
-        if (g_knownCount >= MAX_PEERS + 1)
+        int slot = g_knownCount;
+
+        // Full: the one heard from longest ago, or never, makes room.
+        if (slot >= MAX_KNOWN)
         {
-            return nullptr;
+            slot = 0;
+
+            for (int at = 1; at < g_knownCount; ++at)
+            {
+                if (g_known[at].heard < g_known[slot].heard)
+                {
+                    slot = at;
+                }
+            }
+        }
+        else
+        {
+            ++g_knownCount;
         }
 
-        Known& made = g_known[g_knownCount++];
+        Known& made = g_known[slot];
 
         made = Known{};
         made.where = where;
@@ -779,14 +948,21 @@ namespace
 
     void AskWho(const Mp::Address& where)
     {
-        Known* const known = KnownAt(where);
-
-        if (known == nullptr)
+        if (where.ip == 0xFFFFFFFF)
         {
-            return;
+            g_askedEverybody = Now();
         }
+        else
+        {
+            Known* const known = KnownAt(where);
 
-        known->asked = Now();
+            if (known == nullptr)
+            {
+                return;
+            }
+
+            known->asked = Now();
+        }
 
         uint8_t buffer[Mp::MAX_PACKET];
         Mp::Writer writer(buffer, sizeof(buffer));
@@ -799,7 +975,19 @@ namespace
         }
     }
 
-    // Room is open, hosted, and a level is loaded.
+    const double JOIN_PATIENCE = 5.0;
+
+    // The palace is started only once the host has let me in; until then it waits here.
+    char g_entering[Mp::MAX_LEVEL + 1] = {};
+    double g_enteringSince = 0.0;
+
+    Mp::Address g_joining = {};
+    char g_joiningText[128] = {};
+    double g_joiningSince = 0.0;
+
+    void JoinRoom(const char* address, const char* level);
+    void StartPalace(const char* level);
+
     bool Hosting()
     {
         return g_opened && g_isHost && World::IsLevelLoaded();
@@ -1028,6 +1216,7 @@ namespace
     // Packet receiving.
 
     void ForgetPeer(const Mp::Address& address);
+    void LeaveRoom(const char* why, const char* notice);
 
     void OnPacket(const Mp::Address& from, const uint8_t* data, int size)
     {
@@ -1058,11 +1247,21 @@ namespace
                 return;
             }
 
-            Peer* const peer = RememberPeer(from, name);
-
-            if (g_settings.chatter)
+            // Only a room opened with CREATE lets anybody in; a copy sitting in the menus stays out of it.
+            if (!g_isHost || !g_opened)
             {
+                ++g_ignored;
+                return;
             }
+
+            if (NameTaken(name, from))
+            {
+                Console::Printf("mp: %s knocks as '%s', a name already in the room; not let in\n", Mp::ToText(from), name);
+                SendRefused(from, "somebody in the room already has your nickname");
+                break;
+            }
+
+            Peer* const peer = RememberPeer(from, name);
 
             uint8_t id = 0;
 
@@ -1070,9 +1269,11 @@ namespace
             {
                 if (peer->id == 0)
                 {
-                    peer->id = FreeId();
-                    Console::Printf("mp: %s is player %u\n", Mp::ToText(from), peer->id);
-                    Log(AMOD_LOG_INFO, "%s is player %u", Mp::ToText(from), peer->id);
+                    const uint8_t back = TakeGone(from);
+
+                    peer->id = back != 0 ? back : FreeId();
+                    Console::Printf("mp: %s is %splayer %u\n", Mp::ToText(from), back != 0 ? "back as " : "", peer->id);
+                    Log(AMOD_LOG_INFO, "%s is %splayer %u", Mp::ToText(from), back != 0 ? "back as " : "", peer->id);
                 }
 
                 id = peer->id;
@@ -1090,7 +1291,15 @@ namespace
             const uint32_t stamp = reader.U32();
             const uint8_t id = reader.U8();
 
-            if (reader.Bad())
+            bool knocked = false;
+
+            for (int at = 0; at < g_targetCount && !knocked; ++at)
+            {
+                knocked = g_targets[at] == from;
+            }
+
+            // Only the room JOIN knocked at is listened to.
+            if (reader.Bad() || g_isHost || !knocked)
             {
                 ++g_ignored;
                 return;
@@ -1099,7 +1308,6 @@ namespace
             Peer* const peer = RememberPeer(from, name);
             g_lastRtt = static_cast<int>(NowMs() - stamp);
 
-            // Only the host assigns ids.
             if (id != 0 && !g_isHost)
             {
                 if (g_myId != id || !(g_host == from))
@@ -1111,6 +1319,18 @@ namespace
                 g_myId = id;
                 g_host = from;
                 Mp::Names::Set(0, name);
+
+                if (g_hostLostAt > 0.0)
+                {
+                    g_hostLostAt = 0.0;
+                    Console::Printf("mp: back in the room at %s\n", Mp::ToText(from));
+                }
+
+                if (g_enteringSince > 0.0)
+                {
+                    g_enteringSince = 0.0;
+                    StartPalace(g_entering);
+                }
             }
 
             if (peer != nullptr && !peer->greeted)
@@ -1181,7 +1401,6 @@ namespace
             const uint32_t sent = reader.U32();
             const int count = reader.U8();
 
-            // Host ignores incoming STATE packets.
             if (reader.Bad() || g_isHost)
             {
                 ++g_ignored;
@@ -1190,7 +1409,6 @@ namespace
 
             (void)sent;
 
-            // Reject older snapshots.
             if (g_hadState && static_cast<int16_t>(sequence - g_lastState) <= 0)
             {
                 ++g_ignored;
@@ -1213,7 +1431,6 @@ namespace
 
                 if (body.id == g_myId)
                 {
-                    // Keep the host copy for reconciliation.
                     g_saidOfMe = body;
                     g_saidOfMeAt = Now();
                 }
@@ -1358,7 +1575,6 @@ namespace
 
         case Mp::PACKET_WHO:
         {
-            // Only hosted rooms answer WHO.
             if (Hosting())
             {
                 SayRoom(from);
@@ -1417,13 +1633,23 @@ namespace
                 break;
             }
 
+            const double asked = known->asked > g_askedEverybody ? known->asked : g_askedEverybody;
+
             known->heard = Now();
-            known->ping = known->asked > 0.0
-                ? static_cast<int>((known->heard - known->asked) * 1000.0 + 0.5) : -1;
+            known->ping = asked > 0.0 ? static_cast<int>((known->heard - asked) * 1000.0 + 0.5) : -1;
             known->hosting = hosting != 0;
             known->players = players;
             strcpy_s(known->palace, sizeof(known->palace), palace);
             strcpy_s(known->level, sizeof(known->level), level);
+
+            if (g_joiningSince > 0.0 && g_joining == from && level[0] != 0)
+            {
+                char address[sizeof(g_joiningText)] = {};
+
+                strcpy_s(address, sizeof(address), g_joiningText);
+                g_joiningSince = 0.0;
+                JoinRoom(address, level);
+            }
             break;
         }
 
@@ -1479,10 +1705,45 @@ namespace
             break;
         }
 
+        case Mp::PACKET_REFUSED:
+        {
+            char why[MAX_REASON + 1] = {};
+            reader.Text(why, sizeof(why));
+
+            bool knocking = false;
+
+            for (int at = 0; at < g_targetCount && !knocking; ++at)
+            {
+                knocking = g_targets[at] == from;
+            }
+
+            if (reader.Bad() || g_isHost || !knocking)
+            {
+                ++g_ignored;
+                return;
+            }
+
+            char said[MAX_REASON + 64] = {};
+            sprintf_s(said, "%s did not let me in: %s", Mp::ToText(from), why);
+
+            ForgetPeer(from);
+            LeaveRoom(said, NOTICE_NICK);
+            break;
+        }
+
         case Mp::PACKET_BYE:
         {
             Console::Printf("mp: BYE from %s\n", Mp::ToText(from));
+
+            const bool fromHost = !g_isHost && ((g_host.IsSet() && g_host == from) ||
+                (g_hostLostAt > 0.0 && g_lostHost == from));
+
             ForgetPeer(from);
+
+            if (fromHost)
+            {
+                LeaveRoom("the host closed the room", NOTICE_HOST_LEFT);
+            }
             break;
         }
 
@@ -1777,7 +2038,6 @@ namespace
     const int FRESH_LIVES = 3;
     bool g_freshLives = false;
 
-    // Start the level from the lobby.
     void StartPalace(const char* level)
     {
         if (level == nullptr || level[0] == 0)
@@ -1796,12 +2056,17 @@ namespace
         Console::Printf("mp: starting %s\n", level);
     }
 
-    // Open the room and start its palace.
+    void CloseRoom();
+
     void OpenRoom(const char* palace)
     {
+        CloseRoom();
+
         g_settings.host = 1;
         g_isHost = true;
         g_opened = true;
+        g_hostLostAt = 0.0;
+        g_goneCount = 0;
         strcpy_s(g_openedLevel, sizeof(g_openedLevel), palace != nullptr ? palace : "");
         g_myId = 0;
         g_host = Mp::Address{};
@@ -1820,26 +2085,78 @@ namespace
 
     void CloseRoom()
     {
-        if (!g_opened)
+        const bool hosting = g_opened;
+        const bool visiting = !g_isHost && (g_host.IsSet() || g_hostLostAt > 0.0);
+
+        if (!hosting && !visiting)
         {
             return;
         }
 
-        g_opened = false;
-        Console::Print("mp: the room is closed and gone from the list\n");
+        SendBye();
+
+        if (hosting)
+        {
+            g_opened = false;
+            Console::Print("mp: the room is closed and gone from the list\n");
+        }
+        else
+        {
+            Console::Printf("mp: left the room at %s\n", Mp::ToText(g_host.IsSet() ? g_host : g_lostHost));
+        }
+
+        for (int id = 0; id <= MAX_PEERS; ++id)
+        {
+            g_bodyAt[id] = 0.0;
+            g_beforeAt[id] = 0.0;
+        }
+
+        DropAvatars();
+        Mp::Room::LetGo();
+        Mp::Names::Forget();
+
+        g_peerCount = 0;
+        g_goneCount = 0;
+        g_targetCount = 0;
+        g_host = Mp::Address{};
+        g_lostHost = Mp::Address{};
+        g_hostLostAt = 0.0;
+        g_myId = 0;
     }
 
-    // Join the room and start its palace.
     void JoinRoom(const char* address, const char* level)
     {
+        CloseRoom();
+
         Mp::Address where = {};
 
-        if (address == nullptr ||
-            !Mp::Resolve(address, static_cast<uint16_t>(g_settings.port), where))
+        if (address == nullptr || !Mp::Resolve(address, static_cast<uint16_t>(g_settings.port), where))
         {
             Console::Printf("mp: '%s' is not an address\n", address != nullptr ? address : "");
+            Mp::Menus::Notice(NOTICE_NO_ROOM, false);
             return;
         }
+
+        if (level == nullptr || level[0] == 0)
+        {
+            const Known* const known = KnownAt(where);
+
+            if (known == nullptr || known->level[0] == 0)
+            {
+                g_joining = where;
+                g_joiningSince = Now();
+                strcpy_s(g_joiningText, sizeof(g_joiningText), address);
+
+                AskWho(where);
+                Console::Printf("mp: asking %s which palace it is in\n", Mp::ToText(where));
+                return;
+            }
+
+            level = known->level;
+        }
+
+        g_joiningSince = 0.0;
+        g_hostLostAt = 0.0;
 
         strcpy_s(g_settings.peer, sizeof(g_settings.peer), address);
         Config::Set("mp_peer", g_settings.peer);
@@ -1862,11 +2179,17 @@ namespace
         Config::Set("mp_host", 0);
         ResetOwners();
 
+        strcpy_s(g_entering, sizeof(g_entering), level);
+        g_enteringSince = Now();
+
+        for (int at = 0; at < g_targetCount; ++at)
+        {
+            SendHello(g_targets[at]);
+        }
+
         Console::Printf("mp: knocking at %s\n", Mp::ToText(where));
-        StartPalace(level);
     }
 
-    // Lobby rooms come from known and target peers.
     void ShowRooms()
     {
         Mp::Lobby::Room rooms[Mp::Lobby::MAX_ROOMS] = {};
@@ -1877,8 +2200,22 @@ namespace
         {
             const Known& known = g_known[at];
 
-            // Hide rooms that stopped answering.
             if (known.heard <= 0.0 || (now - known.heard) > 6.0)
+            {
+                continue;
+            }
+
+            bool twice = false;
+
+            for (int other = 0; other < g_knownCount && Mp::IsLoopback(known.where) && !twice; ++other)
+            {
+                const Known& seen = g_known[other];
+
+                twice = !Mp::IsLoopback(seen.where) && seen.where.port == known.where.port &&
+                    seen.heard > 0.0 && (now - seen.heard) <= 6.0 && strcmp(seen.level, known.level) == 0;
+            }
+
+            if (twice)
             {
                 continue;
             }
@@ -1896,15 +2233,39 @@ namespace
         Mp::Lobby::Rooms(rooms, count);
     }
 
-    // Query all targets and the local socket.
     void AskAround()
     {
-        Mp::Address mine = {};
+        Mp::Address here = {};
+        Mp::Address everybody = {};
 
-        mine.ip = 0x0100007F;
-        mine.port = g_socket.Port();
+        here.ip = 0x0100007F;
+        everybody.ip = 0xFFFFFFFF;
 
-        AskWho(mine);
+        for (int at = 0; at < g_settings.slots; ++at)
+        {
+            const uint16_t port = static_cast<uint16_t>(g_settings.port + at);
+
+            AskWho(Mp::WithPort(here, port));
+            AskWho(Mp::WithPort(everybody, port));
+        }
+
+        static char resolvedFor[sizeof(g_settings.peer)] = {};
+        static Mp::Address last = {};
+
+        if (strcmp(resolvedFor, g_settings.peer) != 0)
+        {
+            strcpy_s(resolvedFor, sizeof(resolvedFor), g_settings.peer);
+
+            if (!Mp::Resolve(g_settings.peer, static_cast<uint16_t>(g_settings.port), last))
+            {
+                last = Mp::Address{};
+            }
+        }
+
+        if (last.IsSet() && !Mp::IsLoopback(last))
+        {
+            AskWho(last);
+        }
 
         for (int at = 0; at < g_targetCount; ++at)
         {
@@ -1920,7 +2281,6 @@ namespace
         }
     }
 
-    // Clear disconnected peer state.
     void ForgetPeer(const Mp::Address& address)
     {
         const bool wasHost = g_host.IsSet() && g_host == address;
@@ -1945,7 +2305,6 @@ namespace
             break;
         }
 
-        // Player 0 is the host.
         if (wasHost)
         {
             Mp::Room::LetGo();
@@ -1968,9 +2327,26 @@ namespace
                 continue;
             }
 
-            Console::Printf("mp: %s went quiet\n", Mp::ToText(g_peers[at].address));
-
+            const Mp::Address address = g_peers[at].address;
             const uint8_t id = g_peers[at].id;
+
+            if (!g_isHost && g_host.IsSet() && g_host == address)
+            {
+                g_lostHost = address;
+                g_hostLostAt = now;
+                Console::Printf("mp: the host at %s went quiet; trying to get back in for %.0fs\n",
+                    Mp::ToText(address), RECONNECT_TIME);
+                ForgetPeer(address);
+                continue;
+            }
+
+            Console::Printf("mp: %s went quiet\n", Mp::ToText(address));
+
+            if (g_isHost)
+            {
+                RememberGone(address, id);
+            }
+
             if (id != 0 && id <= MAX_PEERS)
             {
                 g_bodyAt[id] = 0.0;
@@ -1981,7 +2357,36 @@ namespace
         }
     }
 
-    // Predict local movement and reconcile to the host.
+    void LeaveRoom(const char* why, const char* notice)
+    {
+        const bool playing = World::IsLevelLoaded();
+        const bool leaving = playing && World::LeaveLevel();
+
+        Console::Printf("mp: %s%s\n", why,
+            leaving ? "; back to the main menu" : (playing ? "; the level is yours alone now" : ""));
+
+        Mp::Menus::Notice(notice, leaving);
+
+        g_enteringSince = 0.0;
+
+        g_hostLostAt = 0.0;
+        g_lostHost = Mp::Address{};
+        g_host = Mp::Address{};
+        g_myId = 0;
+        g_targetCount = 0;
+        g_joiningSince = 0.0;
+
+        Mp::Names::Forget();
+        Mp::Room::LetGo();
+        DropAvatars();
+
+        for (int id = 0; id <= MAX_PEERS; ++id)
+        {
+            g_bodyAt[id] = 0.0;
+            g_beforeAt[id] = 0.0;
+        }
+    }
+
     void Reconcile(const Mp::Body& mine, float seconds)
     {
         if (g_isHost || g_myId == 0 || g_saidOfMeAt <= 0.0 || g_settings.pull <= 0.0f)
@@ -2160,7 +2565,6 @@ namespace
             g_sinceSpent += seconds;
             g_sinceLook += seconds;
 
-            // Check room changes frequently.
             if (g_sinceLook >= 0.25f)
             {
                 g_sinceLook = 0.0f;
@@ -2179,7 +2583,6 @@ namespace
             }
         }
 
-        // Clients send position anchors periodically.
         if (!g_isHost && here && g_settings.anchor > 0.0f)
         {
             g_sinceAnchor += seconds;
@@ -2238,6 +2641,16 @@ namespace
         ++g_renderFrames;
         Pump(frame != nullptr ? frame->delta : 0.0f);
 
+        const bool inRoom = g_opened || (!g_isHost && (g_host.IsSet() || g_hostLostAt > 0.0));
+        const char* const current = Box::Current();
+
+        if (inRoom && g_enteringSince <= 0.0 && current != nullptr && strcmp(current, "IDM_MAIN_MENU") == 0)
+        {
+            CloseRoom();
+        }
+
+        Mp::Menus::Tick();
+
         // Redraw the rooms list from session data.
         g_sinceRooms += frame != nullptr ? frame->delta : 0.0f;
 
@@ -2254,6 +2667,36 @@ namespace
         {
             g_sinceAsk = 0.0f;
             AskAround();
+
+            if (g_enteringSince > 0.0 && Now() - g_enteringSince > JOIN_PATIENCE)
+            {
+                g_enteringSince = 0.0;
+                g_targetCount = 0;
+                Console::Printf("mp: the room at %s did not let me in; nobody answered\n", g_settings.peer);
+                Mp::Menus::Notice(NOTICE_NO_ROOM, false);
+            }
+
+            if (g_joiningSince > 0.0)
+            {
+                if (Now() - g_joiningSince > JOIN_PATIENCE)
+                {
+                    g_joiningSince = 0.0;
+                    Console::Printf("mp: no room answered at %s\n", Mp::ToText(g_joining));
+                    Mp::Menus::Notice(NOTICE_NO_ROOM, false);
+                }
+                else
+                {
+                    AskWho(g_joining);
+                }
+            }
+        }
+
+        if (g_hostLostAt > 0.0 && Now() - g_hostLostAt > RECONNECT_TIME)
+        {
+            const bool netLost = g_netTroubleAt > 0.0 && Now() - g_netTroubleAt < NET_TROUBLE_FRESH;
+
+            LeaveRoom(netLost ? "the connection is lost" : "the host did not come back",
+                netLost ? NOTICE_NET_LOST : NOTICE_HOST_LEFT);
         }
 
         // Broadcast player names once per second.
@@ -2299,23 +2742,8 @@ namespace
             return false;
         }
 
-        Mp::Address peer = {};
-        if (!Mp::Resolve(g_settings.peer, static_cast<uint16_t>(g_settings.port), peer))
-        {
-            Log(AMOD_LOG_WARNING, "mp_peer '%s' is not an address; nothing will be sent", g_settings.peer);
-        }
-        else if (Mp::IsLoopback(peer))
-        {
-            BuildLoopbackTargets(peer);
-        }
-        else
-        {
-            g_targets[g_targetCount++] = peer;
-        }
-
-        g_isHost = g_settings.host < 0
-            ? g_socket.Port() == static_cast<uint16_t>(g_settings.port)
-            : g_settings.host != 0;
+        g_isHost = false;
+        g_opened = false;
 
         strcpy_s(g_name, sizeof(g_name), Mp::Names::Mine());
 
@@ -2481,6 +2909,11 @@ namespace
         else if (g_myId != 0)
         {
             Console::Printf("mp: client, player %u, host %s\n", g_myId, Mp::ToText(g_host));
+        }
+        else if (g_hostLostAt > 0.0)
+        {
+            Console::Printf("mp: client, the host %s went quiet; knocking for %.0fs more\n",
+                Mp::ToText(g_lostHost), RECONNECT_TIME - (Now() - g_hostLostAt));
         }
         else
         {

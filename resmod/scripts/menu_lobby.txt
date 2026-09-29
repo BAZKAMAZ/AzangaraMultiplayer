@@ -229,7 +229,7 @@ $text_buttons
 	$button
 	{
 		$id "ID_MP_CREATE"
-		$pos 131 389
+		$pos 110 389
 		$text "Create"
 		$rect_size 130 30
 		$v_align "center"
@@ -245,13 +245,31 @@ $text_buttons
 	$button
 	{
 		$id "ID_MP_JOIN"
-		$pos 320 389
+		$pos 250 389
 		$text "Join"
 		$rect_size 130 30
 		$v_align "center"
 		$h_align "center"
 
-		$help "Walk into the room picked below, or type an address"
+		$help "Walk into the room picked below, or click it twice"
+		$warning ""
+
+		$unreg_enabled 1
+		$keyctrl_button 0
+	}
+
+	$button
+	{
+		$id "ID_MP_ENTER_IP"
+		$pos 390 389
+		$text "Enter IP"
+		$rect_size 130 30
+		$v_align "center"
+		$h_align "center"
+
+		$box_menu "IDM_MP_ADDRESS"
+
+		$help "Type the address of a room that is not listed"
 		$warning ""
 
 		$unreg_enabled 1
@@ -261,7 +279,7 @@ $text_buttons
 	$button
 	{
 		$id "ID_BACK"
-		$pos 507 389
+		$pos 530 389
 		$text "Close"
 		$rect_size 130 30
 		$v_align "center"
@@ -295,7 +313,6 @@ $tables
 		$point_step 20
 		$point_margin 10
 
-		// The line's own number, the way the records screen counts its ten down the left.
 		$col
 		{
 			$title ""

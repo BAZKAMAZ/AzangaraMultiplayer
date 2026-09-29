@@ -12,6 +12,12 @@ namespace Mp
 
         bool                                                        Show();
         bool                                                        Ready();
+
+        bool                                                        SetStatic(const char* menuId, const char* staticId, const char* text);
+
+        void                                                        Notice(const char* text, bool afterLevel);
+
+        void                                                        Tick();
     }
 }
 
