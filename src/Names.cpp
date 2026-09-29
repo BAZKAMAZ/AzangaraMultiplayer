@@ -168,7 +168,7 @@ namespace Mp
                 const float tall = 26.0f * scale;
 
                 Render::Rect(x - wide * 0.5f, y - tall * 0.5f, wide, tall, 0x99000000);
-                Render::Text(Render::GetFont("bigitem"), x, y, text, scale, 0xFFFFFFFF, ALIGN_CENTRE);
+                Render::Text(Render::GetFont("default"), x, y, text, scale, 0xFFFFFFFF, ALIGN_CENTRE);
             }
 
             // A quote would end the script's string early.

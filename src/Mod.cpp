@@ -15,6 +15,7 @@
 #include "Room.h"
 #include "Lobby.h"
 #include "Menus.h"
+#include "Master.h"
 #include "Names.h"
 #include "Spent.h"
 #include "Protocol.h"
@@ -198,6 +199,12 @@ namespace
     float g_sinceRooms = 0.0f;
     float g_sinceNames = 0.0f;
 
+    const char* const MASTER_URL = "https://crimson-shadow-5f21.gdnews2023.workers.dev";
+    const float ANNOUNCE_EVERY = 30.0f;
+    const float LIST_EVERY = 5.0f;
+    float g_sinceAnnounce = -1.0f;
+    float g_sinceList = LIST_EVERY;
+
     // Host's latest local-player position.
     Mp::Body g_saidOfMe = {};
     double g_saidOfMeAt = 0.0;
@@ -246,7 +253,7 @@ namespace
 
     double g_netTroubleAt = 0.0;
 
-    // WSAENETDOWN, WSAENETUNREACH, WSAENETRESET, WSAEHOSTUNREACH; winsock2.h
+    // WSAENETDOWN, WSAENETUNREACH, WSAENETRESET, WSAEHOSTUNREACH; winsock2.h.
     const int NET_DOWN = 10050;
     const int NET_UNREACHABLE = 10051;
     const int NET_RESET = 10052;
@@ -260,7 +267,6 @@ namespace
     const char* const NOTICE_NET_LOST = "Connection lost: check your internet";
     const char* const NOTICE_NO_ROOM = "Could not connect to the room";
 
-    // Client side: the host that went quiet and since when; 0 while the host is heard.
     Mp::Address g_lostHost = {};
     double g_hostLostAt = 0.0;
 
@@ -277,8 +283,6 @@ namespace
     float g_sinceTick = 0.0f;
     Mp::Avatars::Drawn g_drawn = {};
     uint16_t g_myRoom = 0;
-
-
     uint64_t g_sent = 0;
     uint64_t g_received = 0;
     uint64_t g_ignored = 0; // invalid/irrelevant packets
@@ -747,8 +751,7 @@ namespace
 
             playing[id] = (who == g_myId)
                 ? here
-                : (g_anchoredAt[id] > 0.0 && (now - g_anchoredAt[id]) < ANCHOR_FRESH &&
-                    SameLevel(g_anchored[id].level));
+                : (g_anchoredAt[id] > 0.0 && (now - g_anchoredAt[id]) < ANCHOR_FRESH && SameLevel(g_anchored[id].level));
 
             where[id] = (who == g_myId) ? mine.room : g_anchored[id].room;
 
@@ -885,7 +888,6 @@ namespace
 
         int slot = g_knownCount;
 
-        // Full: the one heard from longest ago, or never, makes room.
         if (slot >= MAX_KNOWN)
         {
             slot = 0;
@@ -1247,7 +1249,6 @@ namespace
                 return;
             }
 
-            // Only a room opened with CREATE lets anybody in; a copy sitting in the menus stays out of it.
             if (!g_isHost || !g_opened)
             {
                 ++g_ignored;
@@ -1401,6 +1402,7 @@ namespace
             const uint32_t sent = reader.U32();
             const int count = reader.U8();
 
+            // Host ignores incoming STATE packets.
             if (reader.Bad() || g_isHost)
             {
                 ++g_ignored;
@@ -1409,6 +1411,7 @@ namespace
 
             (void)sent;
 
+            // Reject older snapshots.
             if (g_hadState && static_cast<int16_t>(sequence - g_lastState) <= 0)
             {
                 ++g_ignored;
@@ -1431,6 +1434,7 @@ namespace
 
                 if (body.id == g_myId)
                 {
+                    // Keep the host copy for reconciliation.
                     g_saidOfMe = body;
                     g_saidOfMeAt = Now();
                 }
@@ -1633,6 +1637,7 @@ namespace
                 break;
             }
 
+            // Found by a broadcast, it was asked when everybody was.
             const double asked = known->asked > g_askedEverybody ? known->asked : g_askedEverybody;
 
             known->heard = Now();
@@ -1899,7 +1904,6 @@ namespace
 
             const bool playing = (now - g_pressedAt[id]) < INPUT_FRESH && (now - g_anchoredAt[id]) < INPUT_FRESH;
 
-            // Skip remote bodies in another room.
             if (!playing || g_anchored[id].room != mine.room || !SameLevel(g_anchored[id].level))
             {
                 if (g_avatar[id] != nullptr)
@@ -2014,7 +2018,6 @@ namespace
 
             wanted[id] = true;
 
-            // Step for collision/touch, then restore position.
             Mp::Room::ShutExit(true);
             Mp::Bodies::Place(g_avatar[id], others[at].position);
             Mp::Bodies::Step(g_avatar[id], 0, 0, 0, seconds);
@@ -2038,6 +2041,7 @@ namespace
     const int FRESH_LIVES = 3;
     bool g_freshLives = false;
 
+    // Start the level from the lobby.
     void StartPalace(const char* level)
     {
         if (level == nullptr || level[0] == 0)
@@ -2079,6 +2083,9 @@ namespace
 
         ResetOwners();
 
+        // Listed on the internet as soon as the level is up.
+        g_sinceAnnounce = -1.0f;
+
         Console::Printf("mp: the room is open on port %u, listed once in the level\n", g_socket.Port());
         StartPalace(g_openedLevel);
     }
@@ -2098,6 +2105,7 @@ namespace
         if (hosting)
         {
             g_opened = false;
+            Mp::Master::Withdraw(g_socket.Port());
             Console::Print("mp: the room is closed and gone from the list\n");
         }
         else
@@ -2200,6 +2208,7 @@ namespace
         {
             const Known& known = g_known[at];
 
+            // Hide rooms that stopped answering.
             if (known.heard <= 0.0 || (now - known.heard) > 6.0)
             {
                 continue;
@@ -2230,6 +2239,32 @@ namespace
             strcpy_s(room.level, sizeof(room.level), known.level);
         }
 
+        Mp::Master::Entry listed[Mp::Master::MAX_ENTRIES] = {};
+        const int listedCount = Mp::Master::Take(listed, Mp::Master::MAX_ENTRIES);
+
+        for (int at = 0; at < listedCount && count < Mp::Lobby::MAX_ROOMS; ++at)
+        {
+            bool shown = false;
+
+            for (int other = 0; other < count && !shown; ++other)
+            {
+                shown = strcmp(rooms[other].address, listed[at].address) == 0;
+            }
+
+            if (shown)
+            {
+                continue;
+            }
+
+            Mp::Lobby::Room& room = rooms[count++];
+
+            room.ping = -1;
+            room.players = listed[at].players;
+            strcpy_s(room.address, sizeof(room.address), listed[at].address);
+            strcpy_s(room.palace, sizeof(room.palace), listed[at].palace);
+            strcpy_s(room.level, sizeof(room.level), listed[at].level);
+        }
+
         Mp::Lobby::Rooms(rooms, count);
     }
 
@@ -2249,6 +2284,7 @@ namespace
             AskWho(Mp::WithPort(everybody, port));
         }
 
+        // Resolve blocks on a host name, so mp_peer is looked up once per change, not once a second.
         static char resolvedFor[sizeof(g_settings.peer)] = {};
         static Mp::Address last = {};
 
@@ -2279,6 +2315,19 @@ namespace
                 AskWho(g_peers[at].address);
             }
         }
+
+        Mp::Master::Entry listed[Mp::Master::MAX_ENTRIES] = {};
+        const int listedCount = Mp::Master::Take(listed, Mp::Master::MAX_ENTRIES);
+
+        for (int at = 0; at < listedCount; ++at)
+        {
+            Mp::Address where = {};
+
+            if (Mp::Resolve(listed[at].address, static_cast<uint16_t>(g_settings.port), where))
+            {
+                AskWho(where);
+            }
+        }
     }
 
     void ForgetPeer(const Mp::Address& address)
@@ -2305,6 +2354,7 @@ namespace
             break;
         }
 
+        // Player 0 is the host.
         if (wasHost)
         {
             Mp::Room::LetGo();
@@ -2396,13 +2446,11 @@ namespace
 
         const double now = Now();
 
-        // Skip stale or cross-room corrections.
         if ((now - g_saidOfMeAt) > 1.0 || g_saidOfMe.room != mine.room)
         {
             return;
         }
 
-        // Skip correction while climbing.
         if (mine.state != AMOD_PLAYER_STATE_ONFOOT)
         {
             g_notWalkingAt = now;
@@ -2426,14 +2474,12 @@ namespace
 
         apart = sqrtf(apart);
 
-        // Ignore small differences.
         if (apart < 0.05f)
         {
             g_apartSince = 0.0;
             return;
         }
 
-        // Require persistent divergence before correction.
         if (g_apartSince <= 0.0)
         {
             g_apartSince = now;
@@ -2583,6 +2629,7 @@ namespace
             }
         }
 
+        // Clients send position anchors periodically.
         if (!g_isHost && here && g_settings.anchor > 0.0f)
         {
             g_sinceAnchor += seconds;
@@ -2651,6 +2698,43 @@ namespace
 
         Mp::Menus::Tick();
 
+        const float delta = frame != nullptr ? frame->delta : 0.0f;
+
+        // A hosted room is kept on the internet list, at once and then every ANNOUNCE_EVERY.
+        if (Hosting())
+        {
+            g_sinceAnnounce = g_sinceAnnounce < 0.0f ? ANNOUNCE_EVERY : g_sinceAnnounce + delta;
+
+            if (g_sinceAnnounce >= ANNOUNCE_EVERY)
+            {
+                int playing = 1;
+
+                for (int at = 0; at < g_peerCount; ++at)
+                {
+                    playing += g_peers[at].id != 0 ? 1 : 0;
+                }
+
+                g_sinceAnnounce = 0.0f;
+                Mp::Master::Announce(g_socket.Port(), Mp::Names::Mine(), MyPalace(), g_openedLevel, playing);
+            }
+        }
+
+        // The lobby on screen asks for the list, at once and then every LIST_EVERY.
+        if (current != nullptr && strcmp(current, "IDM_MP_LOBBY") == 0)
+        {
+            g_sinceList += delta;
+
+            if (g_sinceList >= LIST_EVERY)
+            {
+                g_sinceList = 0.0f;
+                Mp::Master::AskList();
+            }
+        }
+        else
+        {
+            g_sinceList = LIST_EVERY;
+        }
+
         // Redraw the rooms list from session data.
         g_sinceRooms += frame != nullptr ? frame->delta : 0.0f;
 
@@ -2693,6 +2777,7 @@ namespace
 
         if (g_hostLostAt > 0.0 && Now() - g_hostLostAt > RECONNECT_TIME)
         {
+            // A failed send on this side means the network went, not the host.
             const bool netLost = g_netTroubleAt > 0.0 && Now() - g_netTroubleAt < NET_TROUBLE_FRESH;
 
             LeaveRoom(netLost ? "the connection is lost" : "the host did not come back",
@@ -2795,6 +2880,7 @@ namespace
         Config::Add("mp_focus", "1");
         Config::Add("mp_loss", "0");
         Config::Add("mp_log", "1");
+        Config::Add("mp_master", "");
 
         strcpy_s(g_settings.peer, sizeof(g_settings.peer), Config::Text("mp_peer", "127.0.0.1"));
 
@@ -3445,6 +3531,13 @@ AMOD_EXPORT int __cdecl AmodInit(const AmodApi* api)
         return AMOD_ERROR;
     }
 
+    const char* const master = Config::Text("mp_master", "");
+
+    if (!Mp::Master::Open(master[0] != 0 ? master : MASTER_URL))
+    {
+        Log(AMOD_LOG_INFO, "no internet room list; rooms are found on this network only");
+    }
+
     g_frameToken = Render::OnFrameBegin(&OnFrameBegin);
 
     if (g_frameToken == AMOD_INVALID_TOKEN)
@@ -3501,6 +3594,13 @@ AMOD_EXPORT void __cdecl AmodShutdown(void)
     Mp::Focus::Release();
     Mp::Background::Release();
     Mp::Avatars::Forget();
+
+    if (g_opened)
+    {
+        Mp::Master::Withdraw(g_socket.Port());
+    }
+
+    Mp::Master::Close();
     StopNetwork();
     Mp::NetShutdown();
 }
