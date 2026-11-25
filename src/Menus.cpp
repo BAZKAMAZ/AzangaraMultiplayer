@@ -56,52 +56,6 @@ namespace Mp
 
             const int SCRIPT_COUNT = sizeof(SCRIPTS) / sizeof(SCRIPTS[0]);
 
-            const char* const LOBBY_BACKGROUND = R"(
-                $images {
-                    $image {
-                        $texture "textures/lobby.jpg"
-                        $pos 0 480
-                        $size 640 480
-                        $unreg_only 0
-                    }
-                }
-            )";
-
-            const char* const LOBBY_ITEMS = R"(
-                $menu_items {
-                    $item {
-                        $id "ID_MP_CREATE"
-                        $text "CREATE ROOM"
-                        $pos 320 330
-                        $rect_size 300 45
-                        $plank_width 6
-                        $h_align "center"
-                        $v_align "center"
-                        $help "Open a room and wait for the others"
-                    }
-                    $item {
-                        $id "ID_MP_JOIN"
-                        $text "JOIN ROOM"
-                        $pos 320 280
-                        $rect_size 300 45
-                        $plank_width 6
-                        $h_align "center"
-                        $v_align "center"
-                        $help "Walk into somebody else's room"
-                    }
-                    $item {
-                        $id "ID_BACK"
-                        $text "BACK"
-                        $pos 320 90
-                        $rect_size 200 45
-                        $plank_width 6
-                        $h_align "center"
-                        $v_align "center"
-                        $help "Back to the main menu"
-                    }
-                }
-            )";
-
             const char* const LOBBY_BUTTON =
                 "$menu_items\n"
                 "{\n"
@@ -114,13 +68,13 @@ namespace Mp
                 "        $text \"MULTIPLAYER\"\n"
                 "        $pos 320 340\n"
                 "        $rect_size 300 45\n"
-                "        $plank_width 9\n"
+                "        $plank_width 11\n"
                 "        $sub_menu \"IDM_MP_LOBBY\"\n"
                 "\n"
                 "        $cursor3d\n"
                 "        {\n"
                 "            $orient 0.36 0 1.57\n"
-                "            $pos -3.6 2.15 -9\n"
+                "            $pos -3.9 2.21 -9\n"
                 "        }\n"
                 "\n"
                 "        $help \"Play online together\"\n"
@@ -268,14 +222,6 @@ namespace Mp
                 {
                     const Script& script = SCRIPTS[at];
                     bool made = Box::Exists(script.menuId) || Box::RegisterFromScript(script.menuId, script.file);
-
-                    if (!made && Same(script.menuId, LOBBY_MENU) && Box::Register(LOBBY_MENU))
-                    {
-                        made = true;
-                        Menu::Add(LOBBY_MENU, LOBBY_BACKGROUND);
-                        Menu::Add(LOBBY_MENU, LOBBY_ITEMS);
-                        Mp::Lobby::Build(LOBBY_MENU);
-                    }
 
                     if (!made)
                     {

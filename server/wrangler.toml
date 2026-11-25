@@ -1,0 +1,8 @@
+name = "azangara-lobby"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "azangara-lobby"
+database_id = "PUT-THE-ID-FROM-wrangler-d1-create-HERE"
